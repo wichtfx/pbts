@@ -16,11 +16,8 @@ import logging
 import base64
 import json
 
-# Cryptography imports
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.backends import default_backend
-from cryptography.exceptions import InvalidSignature
+# BLS Signatures (BLS12-381 curve)
+from py_ecc.bls import G2ProofOfPossession as bls
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -28,58 +25,143 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================================
-# Cryptographic Helper Functions
+# Cryptographic Helper Functions (BLS12-381)
 # ============================================================================
 
 def generate_keypair() -> Tuple[bytes, bytes]:
     """
-    Generate ECDSA keypair for signing/verification.
-    Returns (private_key_pem, public_key_pem) as bytes.
+    Generate BLS keypair for signing/verification.
+    Returns (private_key, public_key) as bytes.
+    Uses BLS12-381 curve with G2 signatures (proof of possession).
     """
-    private_key = ec.generate_private_key(ec.SECP256K1(), default_backend())
-    public_key = private_key.public_key()
+    # BLS12-381 curve order (private key must be in range [1, CURVE_ORDER))
+    CURVE_ORDER = 52435875175126190479447740508185965837690552500527637822603658699938581184513
     
-    private_pem = private_key.private_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.PKCS8,
-        encryption_algorithm=serialization.NoEncryption()
-    )
+    # Generate a valid private key by reducing random bytes modulo curve order
+    while True:
+        private_key_bytes = secrets.token_bytes(32)
+        private_key_int = int.from_bytes(private_key_bytes, 'big')
+        
+        # Reduce modulo curve order and ensure it's not zero
+        private_key_int = private_key_int % CURVE_ORDER
+        if private_key_int != 0:
+            break
     
-    public_pem = public_key.public_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo
-    )
+    # Convert back to bytes (ensure 32-byte representation)
+    private_key_bytes = private_key_int.to_bytes(32, 'big')
     
-    return private_pem, public_pem
+    # Derive public key from private key
+    public_key = bls.SkToPk(private_key_int)
+    
+    return private_key_bytes, public_key
 
 
-def sign_message(private_key_pem: bytes, message: bytes) -> bytes:
-    """Sign a message with ECDSA private key."""
-    private_key = serialization.load_pem_private_key(
-        private_key_pem, 
-        password=None,
-        backend=default_backend()
-    )
-    signature = private_key.sign(message, ec.ECDSA(hashes.SHA256()))
+def sign_message(private_key_bytes: bytes, message: bytes) -> bytes:
+    """
+    Sign a message with BLS private key.
+    Returns signature (96 bytes).
+    """
+    # Convert bytes to integer for py-ecc
+    private_key_int = int.from_bytes(private_key_bytes, 'big')
+    signature = bls.Sign(private_key_int, message)
     return signature
 
 
-def verify_signature(public_key_pem: bytes, message: bytes, signature: bytes) -> bool:
-    """Verify ECDSA signature. Returns True if valid, False otherwise."""
+def verify_signature(public_key_bytes: bytes, message: bytes, signature: bytes) -> bool:
+    """
+    Verify BLS signature. Returns True if valid, False otherwise.
+    """
     try:
-        public_key = serialization.load_pem_public_key(
-            public_key_pem,
-            backend=default_backend()
-        )
-        public_key.verify(signature, message, ec.ECDSA(hashes.SHA256()))
-        return True
-    except (InvalidSignature, Exception):
+        return bls.Verify(public_key_bytes, message, signature)
+    except Exception:
+        return False
+
+
+def aggregate_signatures(signatures: List[bytes]) -> bytes:
+    """
+    Aggregate multiple BLS signatures into one.
+    This is the key advantage of BLS - constant size proof!
+    """
+    if not signatures:
+        raise ValueError("Cannot aggregate empty signature list")
+    return bls.Aggregate(signatures)
+
+
+def aggregate_verify(
+    public_keys: List[bytes],
+    messages: List[bytes],
+    aggregate_signature: bytes
+) -> bool:
+    """
+    Verify an aggregate signature against multiple public keys and messages.
+    This is MUCH faster than verifying each signature individually!
+    
+    Returns True if the aggregate signature is valid for all (pk, msg) pairs.
+    """
+    try:
+        return bls.AggregateVerify(public_keys, messages, aggregate_signature)
+    except Exception:
         return False
 
 
 def hash_piece(piece_data: bytes) -> bytes:
     """SHA1 hash of a piece (standard BitTorrent)."""
     return hashlib.sha1(piece_data).digest()
+
+
+# ============================================================================
+# PBTS Attestation Functions (Algorithms from Paper)
+# ============================================================================
+
+def attest_piece_transfer(
+    receiver_private_key: bytes,
+    sender_public_key: bytes,
+    piece_hash: bytes,
+    piece_index: int,
+    infohash: bytes,
+    timestamp: int
+) -> bytes:
+    """
+    Generate cryptographic receipt for piece transfer (Attest algorithm).
+    
+    Args:
+        receiver_private_key: Receiver's BLS private key (32 bytes)
+        sender_public_key: Sender's BLS public key (48 bytes)
+        piece_hash: SHA1 hash of the piece
+        piece_index: Index of the piece in the torrent
+        infohash: SHA1 hash of the torrent
+        timestamp: Unix timestamp of transfer
+        
+    Returns:
+        BLS signature (receipt) as bytes (96 bytes)
+    """
+    # Construct message: infohash || sender_pk || piece_hash || index || timestamp
+    message = infohash + sender_public_key + piece_hash + piece_index.to_bytes(4, 'big') + timestamp.to_bytes(8, 'big')
+    
+    # Sign with receiver's key
+    receipt = sign_message(receiver_private_key, message)
+    return receipt
+
+
+def verify_receipt(
+    receiver_public_key: bytes,
+    sender_public_key: bytes,
+    piece_hash: bytes,
+    piece_index: int,
+    infohash: bytes,
+    timestamp: int,
+    receipt: bytes
+) -> bool:
+    """
+    Verify cryptographic receipt (Verify algorithm).
+    
+    Returns True if receipt is valid, False otherwise.
+    """
+    # Reconstruct the message that was signed
+    message = infohash + sender_public_key + piece_hash + piece_index.to_bytes(4, 'big') + timestamp.to_bytes(8, 'big')
+    
+    # Verify BLS signature
+    return verify_signature(receiver_public_key, message, receipt)
 
 
 # ============================================================================
@@ -457,17 +539,17 @@ def register():
         # Verify signature if provided and verification is enabled
         if signature and state.verify_signatures:
             try:
-                public_key_pem = base64.b64decode(public_key)
+                public_key_bytes = base64.b64decode(public_key)
                 signature_bytes = base64.b64decode(signature)
                 
                 # Construct message: "register" || instance_id || user_id
                 message = b"register" + state.instance_id.encode() + user_id.encode()
                 
-                # Verify signature
-                if not verify_signature(public_key_pem, message, signature_bytes):
+                # Verify BLS signature
+                if not verify_signature(public_key_bytes, message, signature_bytes):
                     return jsonify({'success': False, 'error': 'Invalid signature'}), 401
                 
-                logger.info(f"Verified signature for user registration: {user_id}")
+                logger.info(f"Verified BLS signature for user registration: {user_id}")
                 
             except Exception as e:
                 logger.error(f"Signature verification error: {e}")
@@ -528,7 +610,7 @@ def report():
             try:
                 # Try to decode sender's public key
                 try:
-                    sender_pk_pem = base64.b64decode(public_key or user.public_key)
+                    sender_pk = base64.b64decode(public_key or user.public_key)
                 except Exception as e:
                     logger.warning(f"Could not decode sender public key: {e}")
                     # Skip receipt verification if key can't be decoded
@@ -541,6 +623,12 @@ def report():
                         'verified_receipts': 0,
                         'warning': 'Receipt verification skipped due to invalid key format'
                     })
+                
+                # Collect all receipts for batch verification
+                valid_receipts = []
+                public_keys_for_agg = []
+                messages_for_agg = []
+                signatures_for_agg = []
                 
                 for receipt_data in receipts:
                     # Extract receipt fields
@@ -557,49 +645,72 @@ def report():
                         logger.warning(f"Incomplete receipt data from {user_id}")
                         continue
                     
-                    # Decode receipt components
-                    receiver_pk_pem = base64.b64decode(receiver_pk_b64)
-                    piece_hash = bytes.fromhex(piece_hash_hex)
-                    infohash = bytes.fromhex(infohash_hex)
-                    receipt_sig = base64.b64decode(receipt_sig_b64)
-                    
-                    # Check timestamp is recent (within acceptance window)
-                    current_time = int(time.time())
-                    if abs(current_time - timestamp) > state.receipt_window:
-                        logger.warning(f"Receipt expired for {user_id}: {current_time - timestamp}s old")
+                    try:
+                        # Decode receipt components
+                        receiver_pk = base64.b64decode(receiver_pk_b64)
+                        piece_hash = bytes.fromhex(piece_hash_hex)
+                        infohash = bytes.fromhex(infohash_hex)
+                        receipt_sig = base64.b64decode(receipt_sig_b64)
+                        
+                        # Check timestamp is recent (within acceptance window)
+                        current_time = int(time.time())
+                        if abs(current_time - timestamp) > state.receipt_window:
+                            logger.warning(f"Receipt expired for {user_id}: {current_time - timestamp}s old")
+                            continue
+                        
+                        # Generate receipt ID for double-spend check
+                        receipt_id = hashlib.sha256(
+                            infohash + sender_pk + receiver_pk + 
+                            piece_hash + piece_index.to_bytes(4, 'big')
+                        ).hexdigest()
+                        
+                        # Check if receipt already used
+                        if state.is_receipt_used(receipt_id):
+                            logger.warning(f"Receipt already used: {receipt_id[:16]}...")
+                            continue
+                        
+                        # Reconstruct the message that was signed
+                        message = infohash + sender_pk + piece_hash + piece_index.to_bytes(4, 'big') + timestamp.to_bytes(8, 'big')
+                        
+                        # Store for batch verification
+                        valid_receipts.append({
+                            'receipt_id': receipt_id,
+                            'piece_size': piece_size
+                        })
+                        public_keys_for_agg.append(receiver_pk)
+                        messages_for_agg.append(message)
+                        signatures_for_agg.append(receipt_sig)
+                        
+                    except Exception as e:
+                        logger.warning(f"Error processing receipt: {e}")
                         continue
-                    
-                    # Generate receipt ID for double-spend check
-                    receipt_id = hashlib.sha256(
-                        infohash + sender_pk_pem + receiver_pk_pem + 
-                        piece_hash + piece_index.to_bytes(4, 'big')
-                    ).hexdigest()
-                    
-                    # Check if receipt already used
-                    if state.is_receipt_used(receipt_id):
-                        logger.warning(f"Receipt already used: {receipt_id[:16]}...")
-                        continue
-                    
-                    # Verify the receipt signature
-                    if verify_receipt(
-                        receiver_pk_pem, sender_pk_pem, piece_hash, 
-                        piece_index, infohash, timestamp, receipt_sig
-                    ):
-                        # Receipt is valid - mark as used and count it
-                        state.mark_receipt_used(receipt_id)
-                        verified_upload += piece_size
-                        verified_download += piece_size  # Peer also downloaded
-                        logger.info(f"Verified receipt {receipt_id[:16]}... for {user_id}")
-                    else:
-                        logger.warning(f"Invalid receipt signature from {user_id}")
+                
+                # Batch verify all receipts using BLS aggregate verification
+                if valid_receipts:
+                    try:
+                        # Aggregate all signatures
+                        aggregate_sig = aggregate_signatures(signatures_for_agg)
+                        
+                        # Verify all at once (MUCH faster than individual verification!)
+                        if aggregate_verify(public_keys_for_agg, messages_for_agg, aggregate_sig):
+                            # All receipts are valid!
+                            for receipt_info in valid_receipts:
+                                state.mark_receipt_used(receipt_info['receipt_id'])
+                                verified_upload += receipt_info['piece_size']
+                                verified_download += receipt_info['piece_size']
+                            
+                            logger.info(f"Batch verified {len(valid_receipts)} receipts for {user_id} "
+                                      f"({verified_upload} bytes upload, {verified_download} bytes download)")
+                        else:
+                            logger.warning(f"Aggregate signature verification failed for {user_id}")
+                            # Don't credit any receipts if aggregate verification fails
+                    except Exception as e:
+                        logger.error(f"Batch verification error: {e}", exc_info=True)
                 
                 # If receipts were provided, use only verified amounts
                 if len(receipts) > 0:
                     uploaded_delta = verified_upload
                     downloaded_delta = verified_download
-                    logger.info(f"Report from {user_id}: {len(receipts)} receipts, "
-                              f"{verified_upload} bytes verified upload, "
-                              f"{verified_download} bytes verified download")
                     
             except Exception as e:
                 logger.error(f"Receipt verification error: {e}", exc_info=True)
@@ -671,8 +782,13 @@ def health():
 @app.route('/keygen', methods=['POST'])
 def keygen():
     """
-    Generate a new ECDSA keypair for testing.
+    Generate a new BLS keypair for testing.
     In production, clients should generate their own keys securely.
+    
+    BLS12-381 keys:
+    - Private key: 32 bytes
+    - Public key: 48 bytes  
+    - Signature: 96 bytes
     """
     try:
         private_key, public_key = generate_keypair()
@@ -681,6 +797,9 @@ def keygen():
             'success': True,
             'private_key': base64.b64encode(private_key).decode(),
             'public_key': base64.b64encode(public_key).decode(),
+            'key_type': 'BLS12-381',
+            'private_key_size': len(private_key),
+            'public_key_size': len(public_key),
             'warning': 'Store private key securely! Never share it!'
         })
     except Exception as e:
