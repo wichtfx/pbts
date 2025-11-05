@@ -1,0 +1,14 @@
+Flask==3.0.0
+Werkzeug==3.0.1
+bencoder==0.2.0
+
+# Cryptographic features for PBTS
+cryptography==41.0.7
+ecdsa==0.18.0
+
+# Optional: For production deployment
+gunicorn==21.2.0
+
+# Optional: For future PBTS features
+# py-ecc==6.0.0  # For BLS aggregate signatures
+# web3==6.11.3   # For smart contract integration
