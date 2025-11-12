@@ -90,7 +90,6 @@ python tracker.py
 
 # Run tests
 python test_tracker.py
-python test_crypto.py
 ```
 
 ## Project Structure
