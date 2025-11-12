@@ -90,7 +90,6 @@ python tracker.py
 
 # Run tests
 python test_tracker.py
-python test_crypto.py
 ```
 
 ## Project Structure
@@ -108,7 +107,7 @@ python test_crypto.py
 - Python 3.11+
 - Flask 3.0+
 - bencoder 0.2.0
-- cryptography 41.0+
+- py_ecc 8.0+
 
 ## Docker
 
