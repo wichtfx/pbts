@@ -24,10 +24,11 @@ The tracker runs on port 8000.
 
 ### PBTS Extensions
 
-- User registration with ECDSA keypairs
-- Cryptographic receipts for piece transfers
+- User registration with BLS12-381 keypairs
+- Cryptographic receipts for piece transfers (with signature aggregation)
 - Double-spend prevention
 - Portable reputation across tracker instances
+- **BEP 10 Extension Protocol**: Peer-to-peer receipt exchange (see [docs/BEP10_IMPLEMENTATION.md](docs/BEP10_IMPLEMENTATION.md))
 
 ### Smart Contract Integration
 
@@ -268,19 +269,26 @@ python test_smartcontract.py
 ## Project Structure
 
 ```
-├── tracker.py              # Main application
-├── test_tracker.py         # Tracker tests
-├── test_smartcontract.py   # Smart contract tests
-├── deploy_factory.sh       # Deploy factory script
-├── requirements.txt        # Python dependencies
-├── Dockerfile             # Container image
-├── docker-compose.yml     # Docker setup
-├── smartcontract/         # Solidity contracts
+├── tracker.py                # Main tracker application
+├── bep10_extension.py        # BEP 10 extension protocol implementation
+├── test_tracker.py           # Tracker tests
+├── test_bep10.py            # BEP 10 unit tests
+├── test_bep10_integration.py # BEP 10 integration tests
+├── test_smartcontract.py     # Smart contract tests
+├── deploy_factory.sh         # Deploy factory script
+├── requirements.txt          # Python dependencies
+├── Dockerfile                # Container image
+├── docker-compose.yml        # Docker setup
+├── smartcontract/            # Solidity contracts
 │   ├── src/
-│   │   ├── Reputation.sol     # Reputation contract
-│   │   └── factory.sol        # Factory contract
-│   ├── test/              # Contract tests
-│   └── .env               # Blockchain configuration
+│   │   ├── Reputation.sol    # Reputation contract
+│   │   └── factory.sol       # Factory contract
+│   ├── test/                 # Contract tests
+│   └── .env                  # Blockchain configuration
+├── docs/
+│   └── BEP10_IMPLEMENTATION.md   # BEP 10 protocol guide
+├── tests/
+│   └── example_bep10_client.py   # Example BitTorrent client with PBTS
 └── README.md
 ```
 
@@ -309,4 +317,8 @@ MIT
 
 ---
 
-**Compatibility**: BitTorrent BEP 3, 23, 48 compliant
+**Compatibility**: BitTorrent BEP 3, 10, 23, 48 compliant
+
+## Documentation
+
+- **[BEP 10 Implementation Guide](docs/BEP10_IMPLEMENTATION.md)**: Peer-to-peer receipt exchange protocol
