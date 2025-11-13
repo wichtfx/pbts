@@ -5,8 +5,10 @@ bencoder==0.2.0
 # Cryptographic features - BLS12-381 signatures
 py-ecc==6.0.0
 
+# Smart contract integration
+web3==7.0.0
+eth-account==0.13.0
+python-dotenv==1.0.0
+
 # Production deployment
 gunicorn==21.2.0
-
-# Optional: Smart contract integration (future)
-# web3==6.11.3

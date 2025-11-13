@@ -15,9 +15,19 @@ from urllib.parse import parse_qs, quote_from_bytes
 import logging
 import base64
 import json
+import os
+
+# Load environment variables from .env file
+from dotenv import load_dotenv
+load_dotenv()
+load_dotenv('smartcontract/.env')
 
 # BLS Signatures (BLS12-381 curve)
 from py_ecc.bls import G2ProofOfPossession as bls
+
+# Web3 for smart contract interaction
+from web3 import Web3
+from eth_account import Account
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -356,6 +366,293 @@ class TrackerState:
 
 # Initialize tracker state
 state = TrackerState()
+
+
+# ============================================================================
+# Smart Contract Configuration and Helper
+# ============================================================================
+
+class ContractManager:
+    """Manages interaction with Reputation smart contracts"""
+    
+    def __init__(self):
+        # Load configuration from environment variables
+        self.rpc_url = os.getenv('RPC', 'http://127.0.0.1:8545')  # Default to local Anvil/Hardhat
+        self.private_key = os.getenv('PK0', '')  # TEE's private key
+        self.factory_address = os.getenv('FACTORY', '')  # ReputationFactory address
+        
+        # Initialize Web3
+        self.w3 = Web3(Web3.HTTPProvider(self.rpc_url))
+        
+        # Account setup
+        if self.private_key:
+            self.account = Account.from_key(self.private_key)
+        else:
+            self.account = None
+        
+        # Current Reputation contract address (will be set after initialization)
+        self.reputation_address = os.getenv('REPUTATION_ADDRESS', '')
+        
+        # Contract ABIs (simplified for prototype)
+        self.factory_abi = [
+            {
+                "inputs": [
+                    {"name": "_referrerReputation", "type": "address"},
+                    {"name": "_attestation", "type": "bytes"}
+                ],
+                "name": "createReputation",
+                "outputs": [{"name": "", "type": "address"}],
+                "stateMutability": "nonpayable",
+                "type": "function"
+            },
+            {
+                "anonymous": False,
+                "inputs": [
+                    {"indexed": False, "name": "newReputationAddress", "type": "address"},
+                    {"indexed": False, "name": "owner", "type": "address"},
+                    {"indexed": False, "name": "referrer", "type": "address"},
+                    {"indexed": False, "name": "attestation", "type": "bytes"}
+                ],
+                "name": "ReputationCreated",
+                "type": "event"
+            }
+        ]
+        
+        self.reputation_abi = [
+            {
+                "inputs": [{"name": "_username", "type": "string"}],
+                "name": "getUserData",
+                "outputs": [{
+                    "components": [
+                        {"name": "username", "type": "string"},
+                        {"name": "salt", "type": "string"},
+                        {"name": "passwordHash", "type": "bytes32"},
+                        {"name": "downloadSize", "type": "uint256"},
+                        {"name": "uploadSize", "type": "uint256"}
+                    ],
+                    "name": "",
+                    "type": "tuple"
+                }],
+                "stateMutability": "view",
+                "type": "function"
+            },
+            {
+                "inputs": [
+                    {"name": "_username", "type": "string"},
+                    {"name": "_salt", "type": "string"},
+                    {"name": "_passwordHash", "type": "bytes32"},
+                    {"name": "_downloadSize", "type": "uint256"},
+                    {"name": "_uploadSize", "type": "uint256"}
+                ],
+                "name": "addUser",
+                "outputs": [],
+                "stateMutability": "nonpayable",
+                "type": "function"
+            },
+            {
+                "inputs": [
+                    {"name": "_username", "type": "string"},
+                    {"name": "_downloadSize", "type": "uint256"},
+                    {"name": "_uploadSize", "type": "uint256"}
+                ],
+                "name": "updateUser",
+                "outputs": [],
+                "stateMutability": "nonpayable",
+                "type": "function"
+            },
+            {
+                "inputs": [{"name": "_username", "type": "string"}],
+                "name": "migrateUserData",
+                "outputs": [],
+                "stateMutability": "nonpayable",
+                "type": "function"
+            },
+            {
+                "inputs": [],
+                "name": "getOffchainDataUrl",
+                "outputs": [{"name": "", "type": "string"}],
+                "stateMutability": "view",
+                "type": "function"
+            },
+            {
+                "inputs": [{"name": "_offchainDataUrl", "type": "string"}],
+                "name": "setOffchainDataUrl",
+                "outputs": [],
+                "stateMutability": "nonpayable",
+                "type": "function"
+            }
+        ]
+    
+    def is_configured(self) -> bool:
+        """Check if contract manager is properly configured"""
+        return bool(self.private_key and self.factory_address and self.w3.is_connected())
+    
+    def create_reputation_contract(self, referrer_address: str = None) -> str:
+        """Create a new Reputation contract via factory"""
+        if not self.is_configured():
+            raise Exception("Contract manager not configured")
+        
+        # Use zero address if no referrer specified
+        if not referrer_address:
+            referrer_address = "0x0000000000000000000000000000000000000000"
+        
+        # Create factory contract instance
+        factory = self.w3.eth.contract(
+            address=Web3.to_checksum_address(self.factory_address),
+            abi=self.factory_abi
+        )
+        
+        # Build transaction
+        attestation = b"PBTS-Tracker-v1.0"  # Simple attestation
+        tx = factory.functions.createReputation(
+            Web3.to_checksum_address(referrer_address),
+            attestation
+        ).build_transaction({
+            'from': self.account.address,
+            'nonce': self.w3.eth.get_transaction_count(self.account.address),
+            'gas': 2000000,
+            'gasPrice': self.w3.eth.gas_price
+        })
+        
+        # Sign and send transaction
+        signed_tx = self.account.sign_transaction(tx)
+        tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+        
+        # Wait for transaction receipt
+        receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash)
+        
+        # Extract new contract address from event logs
+        if receipt['logs'] and len(receipt['logs']) > 0:
+            # Decode the ReputationCreated event
+            event_log = receipt['logs'][0]
+            decoded_event = factory.events.ReputationCreated().process_log(event_log)
+            new_address = decoded_event['args']['newReputationAddress']
+            
+            # Update current reputation address
+            self.reputation_address = new_address
+            
+            logger.info(f"Created Reputation contract at {new_address}, tx: {tx_hash.hex()}")
+            
+            return new_address
+        else:
+            raise Exception("No logs found in transaction receipt")
+    
+    def add_user_to_contract(self, username: str, salt: str, password_hash: str, 
+                            download_size: int = 0, upload_size: int = 0) -> str:
+        """Add a new user to the Reputation contract"""
+        if not self.reputation_address:
+            raise Exception("No Reputation contract initialized")
+        
+        reputation = self.w3.eth.contract(
+            address=Web3.to_checksum_address(self.reputation_address),
+            abi=self.reputation_abi
+        )
+        
+        # Convert password hash to bytes32
+        # Remove 0x prefix and validate hex string
+        hash_hex = password_hash.replace('0x', '').replace('0X', '')
+        
+        # Validate that it's valid hex (only contains 0-9, a-f, A-F)
+        try:
+            # If shorter than 64 chars, pad with zeros on the left
+            hash_hex = hash_hex.zfill(64)
+            password_hash_bytes = bytes.fromhex(hash_hex)
+        except ValueError as e:
+            raise Exception(f"Invalid password_hash format. Must be a hex string (e.g., '0xabcdef123...'). Error: {e}")
+        
+        tx = reputation.functions.addUser(
+            username,
+            salt,
+            password_hash_bytes,
+            download_size,
+            upload_size
+        ).build_transaction({
+            'from': self.account.address,
+            'nonce': self.w3.eth.get_transaction_count(self.account.address),
+            'gas': 500000,
+            'gasPrice': self.w3.eth.gas_price
+        })
+        
+        signed_tx = self.account.sign_transaction(tx)
+        tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+        receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash)
+        
+        return tx_hash.hex()
+    
+    def get_user_from_contract(self, username: str) -> dict:
+        """Get user data from Reputation contract"""
+        if not self.reputation_address:
+            raise Exception("No Reputation contract initialized")
+        
+        reputation = self.w3.eth.contract(
+            address=Web3.to_checksum_address(self.reputation_address),
+            abi=self.reputation_abi
+        )
+        
+        user_data = reputation.functions.getUserData(username).call()
+        
+        return {
+            'username': user_data[0],
+            'salt': user_data[1],
+            'passwordHash': '0x' + user_data[2].hex(),
+            'downloadSize': user_data[3],
+            'uploadSize': user_data[4],
+            'ratio': user_data[4] / user_data[3] if user_data[3] > 0 else float('inf')
+        }
+    
+    def update_user_on_contract(self, username: str, download_size: int, upload_size: int) -> str:
+        """Update user statistics on Reputation contract"""
+        if not self.reputation_address:
+            raise Exception("No Reputation contract initialized")
+        
+        reputation = self.w3.eth.contract(
+            address=Web3.to_checksum_address(self.reputation_address),
+            abi=self.reputation_abi
+        )
+        
+        tx = reputation.functions.updateUser(
+            username,
+            download_size,
+            upload_size
+        ).build_transaction({
+            'from': self.account.address,
+            'nonce': self.w3.eth.get_transaction_count(self.account.address),
+            'gas': 200000,
+            'gasPrice': self.w3.eth.gas_price
+        })
+        
+        signed_tx = self.account.sign_transaction(tx)
+        tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+        receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash)
+        
+        return tx_hash.hex()
+    
+    def migrate_user_data(self, username: str) -> str:
+        """Migrate user data from referrer contract"""
+        if not self.reputation_address:
+            raise Exception("No Reputation contract initialized")
+        
+        reputation = self.w3.eth.contract(
+            address=Web3.to_checksum_address(self.reputation_address),
+            abi=self.reputation_abi
+        )
+        
+        tx = reputation.functions.migrateUserData(username).build_transaction({
+            'from': self.account.address,
+            'nonce': self.w3.eth.get_transaction_count(self.account.address),
+            'gas': 300000,
+            'gasPrice': self.w3.eth.gas_price
+        })
+        
+        signed_tx = self.account.sign_transaction(tx)
+        tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+        receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash)
+        
+        return tx_hash.hex()
+
+
+# Initialize contract manager
+contract_manager = ContractManager()
 
 # Flask app
 app = Flask(__name__)
@@ -931,6 +1228,198 @@ def config():
         'min_ratio': app.config['MIN_RATIO'],
         'max_peers': app.config['MAX_PEERS'],
         'used_receipts_count': len(state.used_receipts)
+    })
+
+# ============================================================================
+# PBTS Interaction with Smart Contracts
+# ============================================================================
+
+@app.route('/contract/init', methods=['POST'])
+def init_contract():
+    """
+    Initialize a new Reputation contract via factory.
+    By default uses zero address (0x00) as referrer.
+    """
+    try:
+        if not contract_manager.is_configured():
+            return jsonify({
+                'success': False,
+                'error': 'Contract manager not configured. Set RPC_URL, PRIVATE_KEY, and FACTORY_ADDRESS environment variables.'
+            }), 500
+        
+        data = request.get_json(silent=True) or {}
+        referrer = data.get('referrer_address', None)  # Optional referrer address
+        
+        # Create new Reputation contract
+        new_address = contract_manager.create_reputation_contract(referrer)
+        
+        logger.info(f"Created new Reputation contract at {new_address}")
+        
+        return jsonify({
+            'success': True,
+            'reputation_address': new_address,
+            'referrer_address': referrer or '0x0000000000000000000000000000000000000000',
+            'message': 'Reputation contract initialized successfully'
+        })
+        
+    except Exception as e:
+        logger.error(f"Contract init error: {e}", exc_info=True)
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/contract/register', methods=['POST'])
+def contract_register():
+    """
+    Register a new user on the Reputation smart contract.
+    """
+    try:
+        if not contract_manager.reputation_address:
+            return jsonify({
+                'success': False,
+                'error': 'No Reputation contract initialized. Call /contract/init first.'
+            }), 400
+        
+        data = request.get_json(silent=True) or {}
+        username = data.get('username')
+        salt = data.get('salt', '')
+        password_hash = data.get('password_hash')
+        download_size = int(data.get('download_size', 0))
+        upload_size = int(data.get('upload_size', 0))
+        
+        if not username or not password_hash:
+            return jsonify({'success': False, 'error': 'Missing username or password_hash'}), 400
+        
+        # Add user to smart contract
+        tx_hash = contract_manager.add_user_to_contract(
+            username, salt, password_hash, download_size, upload_size
+        )
+        
+        logger.info(f"Registered user {username} on contract. TX: {tx_hash}")
+        
+        return jsonify({
+            'success': True,
+            'username': username,
+            'tx_hash': tx_hash,
+            'message': 'User registered on smart contract'
+        })
+        
+    except Exception as e:
+        logger.error(f"Contract register error: {e}", exc_info=True)
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/contract/user/<username>', methods=['GET'])
+def contract_get_user(username: str):
+    """
+    Get user data and reputation from the Reputation smart contract.
+    """
+    try:
+        if not contract_manager.reputation_address:
+            return jsonify({
+                'success': False,
+                'error': 'No Reputation contract initialized'
+            }), 400
+        
+        # Get user data from contract
+        user_data = contract_manager.get_user_from_contract(username)
+        
+        return jsonify({
+            'success': True,
+            'user': user_data,
+            'contract_address': contract_manager.reputation_address
+        })
+        
+    except Exception as e:
+        logger.error(f"Contract get user error: {e}", exc_info=True)
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/contract/update', methods=['POST'])
+def contract_update():
+    """
+    Update user statistics on the Reputation smart contract.
+    """
+    try:
+        if not contract_manager.reputation_address:
+            return jsonify({
+                'success': False,
+                'error': 'No Reputation contract initialized'
+            }), 400
+        
+        data = request.get_json(silent=True) or {}
+        username = data.get('username')
+        download_size = int(data.get('download_size', 0))
+        upload_size = int(data.get('upload_size', 0))
+        
+        if not username:
+            return jsonify({'success': False, 'error': 'Missing username'}), 400
+        
+        # Update user on smart contract
+        tx_hash = contract_manager.update_user_on_contract(username, download_size, upload_size)
+        
+        logger.info(f"Updated user {username} on contract. TX: {tx_hash}")
+        
+        return jsonify({
+            'success': True,
+            'username': username,
+            'tx_hash': tx_hash,
+            'download_size': download_size,
+            'upload_size': upload_size,
+            'message': 'User statistics updated on smart contract'
+        })
+        
+    except Exception as e:
+        logger.error(f"Contract update error: {e}", exc_info=True)
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/contract/migrate', methods=['POST'])
+def contract_migrate():
+    """
+    Migrate user data from a previous Reputation contract to the current one.
+    """
+    try:
+        if not contract_manager.reputation_address:
+            return jsonify({
+                'success': False,
+                'error': 'No Reputation contract initialized'
+            }), 400
+        
+        data = request.get_json(silent=True) or {}
+        username = data.get('username')
+        
+        if not username:
+            return jsonify({'success': False, 'error': 'Missing username'}), 400
+        
+        # Migrate user data
+        tx_hash = contract_manager.migrate_user_data(username)
+        
+        logger.info(f"Migrated user {username} data. TX: {tx_hash}")
+        
+        return jsonify({
+            'success': True,
+            'username': username,
+            'tx_hash': tx_hash,
+            'message': 'User data migrated from referrer contract'
+        })
+        
+    except Exception as e:
+        logger.error(f"Contract migrate error: {e}", exc_info=True)
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/contract/status', methods=['GET'])
+def contract_status():
+    """
+    Get the current status of smart contract integration.
+    """
+    return jsonify({
+        'configured': contract_manager.is_configured(),
+        'connected': contract_manager.w3.is_connected() if contract_manager.w3 else False,
+        'rpc_url': contract_manager.rpc_url,
+        'account_address': contract_manager.account.address if contract_manager.account else None,
+        'factory_address': contract_manager.factory_address or None,
+        'reputation_address': contract_manager.reputation_address or None
     })
 
 
