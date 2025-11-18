@@ -319,6 +319,55 @@ MIT
 
 **Compatibility**: BitTorrent BEP 3, 10, 23, 48 compliant
 
+## TEE Experiments (For Research Paper)
+
+PBTS includes comprehensive benchmarks for evaluating TEE (Trusted Execution Environment) performance overhead:
+
+### Quick Start
+
+```bash
+# Run all experiments (generates paper-ready LaTeX table)
+python experiments/run_experiments.py --iterations 1000 --duration 60
+
+# Results in experiments/results/
+# - LaTeX table: results_table_*.tex (copy to paper)
+# - CSV data: latency_*.csv
+# - Text report: experiment_report_*.txt
+```
+
+### What's Measured
+
+**Latency Benchmarks:**
+- Key generation (BLS baseline vs TEE-derived)
+- Attestation generation (TDX quote creation)
+- End-to-end registration flow
+
+**Throughput Benchmarks:**
+- Operations per second (single and multi-threaded)
+- Scaling efficiency (1, 2, 4, 8 threads)
+
+### TEE Support
+
+**With Phala TEE:**
+```bash
+pip install dstack-sdk
+python experiments/run_experiments.py
+```
+
+**Without TEE (baseline only):**
+```bash
+# Skip dstack-sdk - still get baseline measurements
+python experiments/run_experiments.py
+```
+
+### Documentation
+
+- **[Quick Start](experiments/QUICKSTART.md)**: Get results for your paper fast
+- **[Experiment Guide](experiments/README.md)**: Detailed experiment documentation
+- **[TEE Integration](docs/TEE_INTEGRATION.md)**: Technical implementation guide
+- **[Summary](EXPERIMENT_SUMMARY.md)**: Complete implementation overview
+
 ## Documentation
 
 - **[BEP 10 Implementation Guide](docs/BEP10_IMPLEMENTATION.md)**: Peer-to-peer receipt exchange protocol
+- **[TEE Integration Guide](docs/TEE_INTEGRATION.md)**: Trusted Execution Environment support
