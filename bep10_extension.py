@@ -61,7 +61,8 @@ class ExtensionHandshake:
         """Convert to bencoded dictionary format"""
         result = {b"m": self.supported_extensions}
         if self.client_version:
-            result[b"v"] = self.client_version.encode() if isinstance(self.client_version, str) else self.client_version
+            result[b"v"] = self.client_version.encode() if isinstance(
+                self.client_version, str) else self.client_version
         if self.listening_port:
             result[b"p"] = self.listening_port
         if self.metadata_size:
@@ -242,12 +243,16 @@ class BEP10Handler:
 
                 # Map remote message IDs
                 if isinstance(pbts_msgs, dict):
-                    self.remote_ext_ids[PBTS_RECEIPT_MSG] = pbts_msgs.get(b"receipt", 0)
-                    self.remote_ext_ids[PBTS_RECEIPT_BATCH_MSG] = pbts_msgs.get(b"receipt_batch", 0)
-                    self.remote_ext_ids[PBTS_REQUEST_RECEIPT_MSG] = pbts_msgs.get(b"request_receipt", 0)
+                    self.remote_ext_ids[PBTS_RECEIPT_MSG] = pbts_msgs.get(
+                        b"receipt", 0)
+                    self.remote_ext_ids[PBTS_RECEIPT_BATCH_MSG] = pbts_msgs.get(
+                        b"receipt_batch", 0)
+                    self.remote_ext_ids[PBTS_REQUEST_RECEIPT_MSG] = pbts_msgs.get(
+                        b"request_receipt", 0)
 
                     self.peer_supports_pbts = True
-                    logger.info(f"Peer supports PBTS extension (IDs: {self.remote_ext_ids})")
+                    logger.info(
+                        f"Peer supports PBTS extension (IDs: {self.remote_ext_ids})")
                     return True
 
             logger.info("Peer does not support PBTS extension")
@@ -370,7 +375,8 @@ class BEP10Handler:
                 return PBTSReceipt.from_dict(data)
 
             elif msg_type == PBTS_RECEIPT_BATCH_MSG:
-                receipts = [PBTSReceipt.from_dict(r) for r in data[b"receipts"]]
+                receipts = [PBTSReceipt.from_dict(
+                    r) for r in data[b"receipts"]]
                 return receipts
 
             elif msg_type == PBTS_REQUEST_RECEIPT_MSG:

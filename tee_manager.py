@@ -64,7 +64,8 @@ class TEEManager:
         self.tee_available = TEE_AVAILABLE
 
         if mode != TEEMode.DISABLED and not TEE_AVAILABLE:
-            raise RuntimeError("TEE mode requested but dstack_sdk not available")
+            raise RuntimeError(
+                "TEE mode requested but dstack_sdk not available")
 
         self.logger = logging.getLogger(__name__)
 
@@ -86,7 +87,8 @@ class TEEManager:
         Returns:
             TEEKeyPair with timing information
         """
-        use_tee = tee_enabled if tee_enabled is not None else (self.mode == TEEMode.ENABLED)
+        use_tee = tee_enabled if tee_enabled is not None else (
+            self.mode == TEEMode.ENABLED)
 
         if use_tee:
             if self.mode == TEEMode.DISABLED:
@@ -179,7 +181,8 @@ class TEEManager:
         duration_ms = (end_time - start_time) * 1000
 
         # Calculate quote size
-        quote_size = len(tdx_quote) if isinstance(tdx_quote, bytes) else len(str(tdx_quote).encode('utf-8'))
+        quote_size = len(tdx_quote) if isinstance(
+            tdx_quote, bytes) else len(str(tdx_quote).encode('utf-8'))
 
         # Update stats
         self.stats['attestations_generated'] += 1
@@ -225,7 +228,8 @@ class TEEManager:
         end_time = time.perf_counter()
         duration_ms = (end_time - start_time) * 1000
 
-        self.logger.warning("verify_attestation is a stub - implement actual verification")
+        self.logger.warning(
+            "verify_attestation is a stub - implement actual verification")
 
         return is_valid, duration_ms
 
@@ -266,7 +270,8 @@ class TEEManager:
 
         if stats['attestations_generated'] > 0:
             stats['avg_attestation_time_ms'] = (
-                stats['total_attestation_time_ms'] / stats['attestations_generated']
+                stats['total_attestation_time_ms'] /
+                stats['attestations_generated']
             )
         else:
             stats['avg_attestation_time_ms'] = 0
