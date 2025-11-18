@@ -21,7 +21,6 @@ except ImportError:
     logging.warning("dstack_sdk not available - TEE features disabled")
 
 from py_ecc.bls import G2ProofOfPossession as bls
-from py_ecc.bls.g2_primitives import G1_to_pubkey, pubkey_to_G1
 import secrets
 
 
@@ -89,10 +88,16 @@ class TEEManager:
         """
         use_tee = tee_enabled if tee_enabled is not None else (self.mode == TEEMode.ENABLED)
 
-        if use_tee and not self.tee_available:
-            raise RuntimeError("TEE requested but not available")
+        if use_tee:
+            if self.mode == TEEMode.DISABLED:
+                raise RuntimeError("TEE requested but mode is DISABLED")
+            if not self.tee_available:
+                raise RuntimeError("TEE requested but not available")
 
         start_time = time.perf_counter()
+
+        # BLS12-381 curve order (private key must be in range [1, CURVE_ORDER))
+        CURVE_ORDER = 52435875175126190479447740508185965837690552500527637822603658699938581184513
 
         if use_tee:
             # TEE-derived key using dstack_sdk
@@ -100,14 +105,34 @@ class TEEManager:
             path = f"pbts/bls/{secrets.token_hex(16)}"
             purpose = "signature"
             key_response = DstackClient().get_key(path, purpose)
-            private_key = key_response.decode_key()  # Returns bytes
-            public_key = bls.SkToPk(int.from_bytes(private_key, 'big'))
-            public_key_bytes = G1_to_pubkey(public_key)
+            private_key_bytes = key_response.decode_key()  # Returns 32 bytes
+
+            # Ensure private key is in valid range for BLS12-381
+            private_key_int = int.from_bytes(private_key_bytes, 'big')
+            private_key_int = private_key_int % CURVE_ORDER
+            if private_key_int == 0:
+                private_key_int = 1  # Ensure non-zero
+            private_key = private_key_int.to_bytes(32, 'big')
+
+            # bls.SkToPk returns bytes directly (48 bytes for BLS12-381 public key)
+            public_key = bls.SkToPk(private_key_int)
         else:
             # Regular BLS key generation
-            private_key = secrets.token_bytes(32)
-            public_key = bls.SkToPk(int.from_bytes(private_key, 'big'))
-            public_key_bytes = G1_to_pubkey(public_key)
+            # Generate a valid private key by reducing random bytes modulo curve order
+            while True:
+                private_key_bytes = secrets.token_bytes(32)
+                private_key_int = int.from_bytes(private_key_bytes, 'big')
+
+                # Reduce modulo curve order and ensure it's not zero
+                private_key_int = private_key_int % CURVE_ORDER
+                if private_key_int != 0:
+                    break
+
+            # Convert back to bytes (ensure 32-byte representation)
+            private_key = private_key_int.to_bytes(32, 'big')
+
+            # bls.SkToPk returns bytes directly (48 bytes for BLS12-381 public key)
+            public_key = bls.SkToPk(private_key_int)
 
         end_time = time.perf_counter()
         duration_ms = (end_time - start_time) * 1000
@@ -118,7 +143,7 @@ class TEEManager:
 
         return TEEKeyPair(
             private_key=private_key,
-            public_key=public_key_bytes,
+            public_key=public_key,
             tee_derived=use_tee,
             derivation_time_ms=duration_ms
         )
@@ -134,7 +159,7 @@ class TEEManager:
         Returns:
             AttestationReport with quote and timing
         """
-        if not self.tee_available:
+        if self.mode == TEEMode.DISABLED or not self.tee_available:
             raise RuntimeError("TEE not available for attestation")
 
         start_time = time.perf_counter()
@@ -215,7 +240,7 @@ class TEEManager:
         Returns:
             Web3 Account object (using secure derivation)
         """
-        if not self.tee_available:
+        if self.mode == TEEMode.DISABLED or not self.tee_available:
             raise RuntimeError("TEE not available")
 
         key_response = DstackClient().get_key(path, purpose)
