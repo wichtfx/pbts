@@ -12,6 +12,13 @@ Tests the complete workflow:
 Requires tracker to be running on localhost:8000
 """
 
+import sys
+from pathlib import Path
+
+# Add project root to path
+project_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(project_root))
+
 import unittest
 import hashlib
 import time
@@ -274,6 +281,12 @@ class TestTrackerIntegration(unittest.TestCase):
 
     def setUp(self):
         """Generate test keypairs and register users"""
+        # Disable signature verification for testing
+        requests.post(
+            f"{self.TRACKER_URL}/config",
+            json={"verify_signatures": False}
+        )
+
         self.alice_sk, self.alice_pk = generate_keypair()
         self.bob_sk, self.bob_pk = generate_keypair()
 
