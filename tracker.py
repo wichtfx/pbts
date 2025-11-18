@@ -1308,22 +1308,25 @@ def generate_attestation():
 @app.route('/verify-attestation', methods=['POST'])
 def verify_attestation():
     """
-    Verify TEE attestation report.
+    Verify TEE attestation report using DCAP QVL.
 
-    NOTE: This is a STUB. User must implement actual verification.
+    This endpoint performs full cryptographic verification of TDX/SGX quotes:
+    - Validates Intel/AMD signature chains
+    - Checks TCB (Trusted Computing Base) status
+    - Verifies payload inclusion in report_data
 
     Request JSON:
         {
-            "quote": "TDX quote to verify",
-            "expected_payload": "expected payload in quote"
+            "quote": "TDX/SGX quote (hex string or bytes)",
+            "expected_payload": "expected payload in quote",
+            "pccs_url": "optional PCCS URL for collateral (defaults to Intel PCS)"
         }
 
     Response:
         {
             "success": true,
             "is_valid": true/false,
-            "verification_time_ms": 1.5,
-            "note": "stub_implementation"
+            "verification_time_ms": 150.5
         }
     """
     if not TEE_AVAILABLE or tee_manager is None:
@@ -1336,19 +1339,19 @@ def verify_attestation():
         data = request.get_json()
         quote = data.get('quote')
         expected_payload = data.get('expected_payload')
+        pccs_url = data.get('pccs_url')  # Optional
 
         if not quote or not expected_payload:
             return jsonify({'success': False, 'error': 'Missing quote or expected_payload'}), 400
 
-        # Verify attestation (STUB)
+        # Verify attestation using DCAP QVL
         is_valid, verification_time_ms = tee_manager.verify_attestation(
-            quote, expected_payload)
+            quote, expected_payload, pccs_url)
 
         return jsonify({
             'success': True,
             'is_valid': is_valid,
-            'verification_time_ms': verification_time_ms,
-            'note': 'STUB - implement actual verification in tee_manager.py'
+            'verification_time_ms': verification_time_ms
         })
 
     except Exception as e:

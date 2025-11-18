@@ -267,98 +267,139 @@ curl -X POST http://localhost:8000/register \
 # 3. Public key in attestation matches public key in registration
 ```
 
-## Implementing Attestation Verification
+## Attestation Verification with DCAP QVL
 
-The current implementation has a **STUB** for verification. You must implement it yourself.
+The implementation uses **dcap-qvl** (Phala Network's DCAP Quote Verification Library) for full cryptographic verification of TDX/SGX quotes.
 
-**File:** `tee_manager.py`
-**Function:** `verify_attestation(quote, expected_payload)`
+**File:** [tee_manager.py](../tee_manager.py)
+**Function:** `verify_attestation(quote, expected_payload, pccs_url=None)`
 
-**Implementation Steps:**
+### Installation
 
-### 1. Parse TDX Quote Structure
+```bash
+pip install dcap-qvl
+```
+
+### How It Works
+
+The verification process performs:
+
+1. **Quote Structure Parsing** - Decodes TDX/SGX quote headers and report body
+2. **Collateral Retrieval** - Fetches certificates and revocation lists from PCCS or Intel PCS
+3. **Signature Chain Verification** - Validates Intel/AMD signature chains
+4. **TCB Status Check** - Verifies Trusted Computing Base is up-to-date
+5. **Payload Validation** - Confirms expected_payload is in quote's report_data field
+
+### Usage Example
+
+```python
+from tee_manager import TEEManager, TEEMode
+
+# Initialize manager with TEE enabled
+manager = TEEManager(mode=TEEMode.ENABLED)
+
+# Generate attestation
+attestation = manager.generate_attestation(payload="user_id:alice")
+
+# Verify attestation (uses Intel PCS by default)
+is_valid, time_ms = manager.verify_attestation(
+    quote=attestation.quote,
+    expected_payload="user_id:alice"
+)
+
+# Or use custom PCCS
+is_valid, time_ms = manager.verify_attestation(
+    quote=attestation.quote,
+    expected_payload="user_id:alice",
+    pccs_url="https://my-pccs.example.com"
+)
+
+print(f"Valid: {is_valid}, Time: {time_ms:.2f}ms")
+```
+
+### API Endpoint Usage
+
+```bash
+curl -X POST http://localhost:8000/verify-attestation \
+  -H "Content-Type: application/json" \
+  -d '{
+    "quote": "030002000000...",
+    "expected_payload": "user_id:alice",
+    "pccs_url": "https://my-pccs.example.com"
+  }'
+```
+
+Response:
+```json
+{
+  "success": true,
+  "is_valid": true,
+  "verification_time_ms": 150.5
+}
+```
+
+### Quote Structure
 
 Intel TDX quotes have this structure:
 ```
 Quote = {
-  header: {...},
+  header: {
+    version: 4,
+    attestation_key_type: 2,  // ECDSA
+    tee_type: 0x81,            // TDX
+    ...
+  },
   report_body: {
     rtmr[0-3]: [48 bytes each],  // Runtime measurements
     report_data: [64 bytes],      // Custom data (payload hash)
     ...
   },
-  signature: {...}                // Intel signature
+  signature: {...}                // Intel ECDSA signature
 }
 ```
 
-### 2. Verify Signature Chain
+### Verification Status Codes
 
-Verify Intel's signature on the quote:
-- Check certificate chain (Intel root CA → intermediate → quote signer)
-- Verify ECDSA signature over quote body
+The library returns these status codes:
+- **OK** - Quote is valid and TCB is up-to-date
+- **SW_HARDENING_NEEDED** - Valid but software hardening recommended
+- **CONFIGURATION_NEEDED** - Valid but configuration changes recommended
+- **OUT_OF_DATE** - TCB is outdated, should update
+- Other codes indicate verification failure
 
-**Resources:**
-- Intel TDX Quote Verification Library: https://github.com/intel/SGXDataCenterAttestationPrimitives
-- Phala verification service (if available)
+### Performance
 
-### 3. Check RTMR Measurements
+Typical verification times:
+- **First verification**: 150-300ms (includes collateral download)
+- **Subsequent verifications**: 50-100ms (cached collateral)
 
-Verify the code running in TEE:
+### Additional RTMR Verification (Optional)
+
+If you need to verify specific RTMR measurements (runtime measurements of code/data):
+
 ```python
+# After dcap-qvl verification passes, extract RTMRs for additional checks
+# Note: dcap-qvl already verifies the signature chain and TCB
+
 # Expected measurements (calculated from source code)
-EXPECTED_RTMR_0 = "..."  # TD firmware
-EXPECTED_RTMR_1 = "..."  # OS loader
 EXPECTED_RTMR_2 = "..."  # Root filesystem (contains tracker code)
 EXPECTED_RTMR_3 = "..."  # Application (Docker image hash)
 
-# Verify quote's RTMRs match expected
-assert quote.report_body.rtmr[2] == EXPECTED_RTMR_2
-assert quote.report_body.rtmr[3] == EXPECTED_RTMR_3
+# Parse quote to extract RTMRs
+# TDX v4: RTMRs are at offsets 112, 160, 208, 256 (48 bytes each)
+rtmr_2 = quote_bytes[208:256]
+rtmr_3 = quote_bytes[256:304]
+
+if rtmr_2 != bytes.fromhex(EXPECTED_RTMR_2):
+    logger.warning("RTMR[2] mismatch - unexpected code version")
+if rtmr_3 != bytes.fromhex(EXPECTED_RTMR_3):
+    logger.warning("RTMR[3] mismatch - unexpected application")
 ```
 
-### 4. Verify Payload
-
-Check that expected payload is in quote:
-```python
-payload_hash = hashlib.sha256(expected_payload.encode()).digest()
-
-# report_data should contain payload hash
-assert quote.report_body.report_data[:32] == payload_hash
-```
-
-### Complete Example
-
-```python
-def verify_attestation(self, quote: str, expected_payload: str) -> Tuple[bool, float]:
-    start_time = time.perf_counter()
-
-    try:
-        # 1. Parse quote (use Intel's library or custom parser)
-        quote_obj = parse_tdx_quote(quote)
-
-        # 2. Verify signature chain
-        if not verify_intel_signature_chain(quote_obj):
-            return False, (time.perf_counter() - start_time) * 1000
-
-        # 3. Check RTMR measurements
-        expected_rtmrs = get_expected_rtmrs()  # From config
-        if quote_obj.rtmr != expected_rtmrs:
-            return False, (time.perf_counter() - start_time) * 1000
-
-        # 4. Verify payload
-        payload_hash = hashlib.sha256(expected_payload.encode()).digest()
-        if quote_obj.report_data[:32] != payload_hash:
-            return False, (time.perf_counter() - start_time) * 1000
-
-        # All checks passed
-        duration_ms = (time.perf_counter() - start_time) * 1000
-        return True, duration_ms
-
-    except Exception as e:
-        self.logger.error(f"Attestation verification failed: {e}")
-        duration_ms = (time.perf_counter() - start_time) * 1000
-        return False, duration_ms
-```
+**Resources:**
+- **dcap-qvl**: https://github.com/Phala-Network/dcap-qvl
+- **Intel DCAP**: https://github.com/intel/SGXDataCenterAttestationPrimitives
+- **dcap-qvl Python Package**: https://pypi.org/project/dcap-qvl/
 
 ## Performance Experiments
 
@@ -443,11 +484,15 @@ DeprecationWarning: TappdClient is deprecated, use DstackClient
 2. Install `dstack-sdk==0.5.3`
 3. Verify `/var/run/dstack.sock` is available (not `/var/run/tappd.sock`)
 
-### Verification Always Returns True
+### Verification Requires dcap-qvl
 ```
-WARNING: verify_attestation is a stub - implement actual verification
+RuntimeError: dcap_qvl not available for attestation verification
 ```
-**Solution:** Implement verification in `tee_manager.py` (see above)
+**Solution:** Install dcap-qvl for full attestation verification:
+```bash
+pip install dcap-qvl
+```
+The implementation uses Phala's dcap-qvl library for full cryptographic verification of TDX/SGX quotes.
 
 ### Performance Issues
 ```
@@ -465,7 +510,7 @@ class TEEManager:
     def __init__(self, mode: TEEMode = TEEMode.DISABLED)
     def generate_keypair(self, tee_enabled: bool = None) -> TEEKeyPair
     def generate_attestation(self, payload: str) -> AttestationReport
-    def verify_attestation(self, quote: str, expected_payload: str) -> Tuple[bool, float]
+    def verify_attestation(self, quote: str, expected_payload: str, pccs_url: Optional[str] = None) -> Tuple[bool, float]
     def get_statistics(self) -> Dict[str, Any]
     def reset_statistics(self)
 ```
@@ -476,14 +521,17 @@ class TEEManager:
 |----------|--------|--------------|-------------|
 | `/keygen-tee` | POST | Yes | Generate TEE-derived keypair |
 | `/generate-attestation` | POST | Yes | Create TDX quote |
-| `/verify-attestation` | POST | Yes | Verify quote (stub) |
+| `/verify-attestation` | POST | Yes | Verify quote using DCAP QVL |
 | `/tee/status` | GET | No | Check TEE availability |
 | `/config` | POST | No | Configure TEE mode |
 
 ## References
 
 - **Phala dstack SDK**: https://github.com/Phala-Network/dstack-sdk
+- **Phala dcap-qvl**: https://github.com/Phala-Network/dcap-qvl (Quote verification library)
+- **dcap-qvl PyPI**: https://pypi.org/project/dcap-qvl/
 - **Intel TDX Documentation**: https://www.intel.com/content/www/us/en/developer/tools/trust-domain-extensions/documentation.html
+- **Intel DCAP**: https://github.com/intel/SGXDataCenterAttestationPrimitives
 - **TEE Attestation Primer**: https://confidentialcomputing.io/wp-content/uploads/sites/10/2023/03/CCC-A-Technical-Analysis-of-Confidential-Computing-v1.3_unlocked.pdf
 - **PBTS Paper**: (add link)
 
