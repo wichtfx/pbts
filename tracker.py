@@ -25,6 +25,10 @@ from dotenv import load_dotenv
 load_dotenv()
 load_dotenv('smartcontract/.env')
 
+# Configure logging (must be before TEE import that uses logger)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 # BLS Signatures (BLS12-381 curve)
 
 # Web3 for smart contract interaction
@@ -32,15 +36,22 @@ load_dotenv('smartcontract/.env')
 # TEE Manager (optional - for TEE-backed operations)
 try:
     from tee_manager import get_tee_manager, set_tee_mode, TEEMode, TEE_AVAILABLE
-    tee_manager = get_tee_manager(TEEMode.DISABLED)  # Default: disabled
+
+    # Read TEE mode from environment variable (default: disabled)
+    tee_mode_str = os.getenv('TEE_MODE', 'disabled').lower()
+    if tee_mode_str == 'enabled':
+        tee_mode = TEEMode.ENABLED
+    elif tee_mode_str == 'benchmark':
+        tee_mode = TEEMode.BENCHMARK
+    else:
+        tee_mode = TEEMode.DISABLED
+
+    tee_manager = get_tee_manager(tee_mode)
+    # Note: TEE mode logging moved to main block to avoid confusion when imported as module
 except ImportError:
     TEE_AVAILABLE = False
     tee_manager = None
     logger.warning("tee_manager not available - TEE features disabled")
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 
 # ============================================================================
@@ -393,18 +404,34 @@ class ContractManager:
         # Load configuration from environment variables
         # Default to local Anvil/Hardhat
         self.rpc_url = os.getenv('RPC', 'http://127.0.0.1:8545')
-        self.private_key = os.getenv('PK0', '')  # TEE's private key
         self.factory_address = os.getenv(
             'FACTORY', '')  # ReputationFactory address
 
         # Initialize Web3
         self.w3 = Web3(Web3.HTTPProvider(self.rpc_url))
 
-        # Account setup
-        if self.private_key:
-            self.account = Account.from_key(self.private_key)
+        # Account setup - prefer TEE-derived key if available
+        if TEE_AVAILABLE and tee_manager is not None and tee_manager.mode != TEEMode.DISABLED:
+            try:
+                # Get Ethereum account from TEE
+                self.account = tee_manager.get_ethereum_account()
+                self.private_key = ''  # Not stored when using TEE
+                logger.info("Using TEE-derived Ethereum account")
+            except Exception as e:
+                logger.warning(
+                    f"Failed to get TEE account, falling back to env var: {e}")
+                self.private_key = os.getenv('PK0', '')
+                if self.private_key:
+                    self.account = Account.from_key(self.private_key)
+                else:
+                    self.account = None
         else:
-            self.account = None
+            # Fallback to environment variable
+            self.private_key = os.getenv('PK0', '')
+            if self.private_key:
+                self.account = Account.from_key(self.private_key)
+            else:
+                self.account = None
 
         # Current Reputation contract address (will be set after initialization)
         self.reputation_address = os.getenv('REPUTATION_ADDRESS', '')
@@ -502,58 +529,115 @@ class ContractManager:
 
     def is_configured(self) -> bool:
         """Check if contract manager is properly configured"""
-        return bool(self.private_key and self.factory_address and self.w3.is_connected())
+        has_account = self.account is not None
+        has_factory = bool(self.factory_address)
+        is_connected = self.w3.is_connected()
+
+        logger.debug(
+            f"is_configured check: account={has_account}, factory={has_factory}, connected={is_connected}")
+
+        return has_account and has_factory and is_connected
 
     def create_reputation_contract(self, referrer_address: str = None) -> str:
         """Create a new Reputation contract via factory"""
-        if not self.is_configured():
-            raise Exception("Contract manager not configured")
+        try:
+            logger.info(">>> create_reputation_contract called")
 
-        # Use zero address if no referrer specified
-        if not referrer_address:
-            referrer_address = "0x0000000000000000000000000000000000000000"
+            if not self.is_configured():
+                raise Exception("Contract manager not configured")
 
-        # Create factory contract instance
-        factory = self.w3.eth.contract(
-            address=Web3.to_checksum_address(self.factory_address),
-            abi=self.factory_abi
-        )
-
-        # Build transaction
-        attestation = b"PBTS-Tracker-v1.0"  # Simple attestation
-        tx = factory.functions.createReputation(
-            Web3.to_checksum_address(referrer_address),
-            attestation
-        ).build_transaction({
-            'from': self.account.address,
-            'nonce': self.w3.eth.get_transaction_count(self.account.address),
-            'gas': 2000000,
-            'gasPrice': self.w3.eth.gas_price
-        })
-
-        # Sign and send transaction
-        signed_tx = self.account.sign_transaction(tx)
-        tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
-
-        # Wait for transaction receipt
-        receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash)
-
-        # Extract new contract address from event logs
-        if receipt['logs'] and len(receipt['logs']) > 0:
-            # Decode the ReputationCreated event
-            event_log = receipt['logs'][0]
-            decoded_event = factory.events.ReputationCreated().process_log(event_log)
-            new_address = decoded_event['args']['newReputationAddress']
-
-            # Update current reputation address
-            self.reputation_address = new_address
+            # Use zero address if no referrer specified
+            if not referrer_address:
+                referrer_address = "0x0000000000000000000000000000000000000000"
 
             logger.info(
-                f"Created Reputation contract at {new_address}, tx: {tx_hash.hex()}")
+                f"Creating factory contract instance at {self.factory_address}")
 
-            return new_address
-        else:
-            raise Exception("No logs found in transaction receipt")
+            # Create factory contract instance
+            factory = self.w3.eth.contract(
+                address=Web3.to_checksum_address(self.factory_address),
+                abi=self.factory_abi
+            )
+
+            logger.info("Factory contract instance created")
+
+            # Build transaction
+            # Generate attestation - prefer TEE if available
+            if TEE_AVAILABLE and tee_manager is not None and tee_manager.mode != TEEMode.DISABLED:
+                try:
+                    # Generate TEE attestation with contract creation details
+                    payload = f"PBTS-Tracker-v1.0:factory={self.factory_address}:referrer={referrer_address}"
+                    logger.info(
+                        f"Generating TEE attestation for payload: {payload}")
+                    attestation_report = tee_manager.generate_attestation(
+                        payload)
+                    attestation = attestation_report.quote.encode() if isinstance(
+                        attestation_report.quote, str) else attestation_report.quote
+                    logger.info(
+                        f"Using TEE attestation (size: {attestation_report.quote_size_bytes} bytes)")
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to generate TEE attestation, using fallback: {e}")
+                    attestation = b"PBTS-Tracker-v1.0"  # Simple attestation fallback
+            else:
+                logger.info(
+                    "Using simple attestation (TEE disabled or unavailable)")
+                attestation = b"PBTS-Tracker-v1.0"  # Simple attestation
+
+            logger.info(
+                f"Building transaction from account {self.account.address}")
+            logger.info(
+                f"Account balance: {self.w3.eth.get_balance(self.account.address)} wei")
+
+            tx = factory.functions.createReputation(
+                Web3.to_checksum_address(referrer_address),
+                attestation
+            ).build_transaction({
+                'from': self.account.address,
+                'nonce': self.w3.eth.get_transaction_count(self.account.address),
+                'gas': 2000000,
+                'gasPrice': self.w3.eth.gas_price
+            })
+
+            logger.info(
+                f"Transaction built: gas={tx['gas']}, gasPrice={tx['gasPrice']}")
+
+            # Sign and send transaction
+            logger.info("Signing transaction...")
+            signed_tx = self.account.sign_transaction(tx)
+
+            logger.info("Sending raw transaction...")
+            tx_hash = self.w3.eth.send_raw_transaction(
+                signed_tx.raw_transaction)
+            logger.info(f"Transaction sent: {tx_hash.hex()}")
+
+            # Wait for transaction receipt
+            logger.info("Waiting for transaction receipt...")
+            receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash)
+            logger.info(
+                f"Transaction receipt received: status={receipt['status']}")
+
+            # Extract new contract address from event logs
+            if receipt['logs'] and len(receipt['logs']) > 0:
+                # Decode the ReputationCreated event
+                event_log = receipt['logs'][0]
+                decoded_event = factory.events.ReputationCreated().process_log(event_log)
+                new_address = decoded_event['args']['newReputationAddress']
+
+                # Update current reputation address
+                self.reputation_address = new_address
+
+                logger.info(
+                    f"✅ Created Reputation contract at {new_address}, tx: {tx_hash.hex()}")
+
+                return new_address
+            else:
+                raise Exception("No logs found in transaction receipt")
+
+        except Exception as e:
+            logger.error(
+                f"❌ Error in create_reputation_contract: {e}", exc_info=True)
+            raise
 
     def add_user_to_contract(self, username: str, salt: str, password_hash: str,
                              download_size: int = 0, upload_size: int = 0) -> str:
@@ -1463,20 +1547,33 @@ def init_contract():
     By default uses zero address (0x00) as referrer.
     """
     try:
+        logger.info("=== Contract Init Request ===")
+        logger.info(
+            f"Contract manager configured: {contract_manager.is_configured()}")
+        logger.info(f"Factory address: {contract_manager.factory_address}")
+        logger.info(
+            f"Account: {contract_manager.account.address if contract_manager.account else 'None'}")
+        logger.info(f"Web3 connected: {contract_manager.w3.is_connected()}")
+
         if not contract_manager.is_configured():
+            error_msg = 'Contract manager not configured. Set RPC_URL, PRIVATE_KEY, and FACTORY_ADDRESS environment variables.'
+            logger.error(error_msg)
             return jsonify({
                 'success': False,
-                'error': 'Contract manager not configured. Set RPC_URL, PRIVATE_KEY, and FACTORY_ADDRESS environment variables.'
+                'error': error_msg
             }), 500
 
         data = request.get_json(silent=True) or {}
         # Optional referrer address
         referrer = data.get('referrer_address', None)
 
+        logger.info(
+            f"Creating Reputation contract with referrer: {referrer or 'None (0x00)'}")
+
         # Create new Reputation contract
         new_address = contract_manager.create_reputation_contract(referrer)
 
-        logger.info(f"Created new Reputation contract at {new_address}")
+        logger.info(f"✅ Created new Reputation contract at {new_address}")
 
         return jsonify({
             'success': True,
@@ -1486,7 +1583,7 @@ def init_contract():
         })
 
     except Exception as e:
-        logger.error(f"Contract init error: {e}", exc_info=True)
+        logger.error(f"❌ Contract init error: {e}", exc_info=True)
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
@@ -1648,4 +1745,18 @@ def contract_status():
 
 
 if __name__ == '__main__':
+    # Log configuration when tracker server starts (not when imported as module)
+    logger.info("=" * 70)
+    logger.info("PBTS Tracker Server Starting")
+    logger.info("=" * 70)
+    if TEE_AVAILABLE and tee_manager:
+        logger.info(f"TEE Mode: {tee_manager.mode.value}")
+        if tee_manager.mode != TEEMode.DISABLED:
+            logger.info("TEE features: ENABLED")
+        else:
+            logger.info("TEE features: disabled (using standard BLS crypto)")
+    else:
+        logger.info("TEE Mode: disabled (dstack_sdk not available)")
+    logger.info("=" * 70)
+
     app.run(host='0.0.0.0', port=8000, debug=False)

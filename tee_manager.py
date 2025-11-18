@@ -13,7 +13,7 @@ from enum import Enum
 
 # Import will be optional - graceful degradation if not available
 try:
-    from dstack_sdk import DstackClient, AsyncDstackClient
+    from dstack_sdk import DstackClient
     from dstack_sdk.ethereum import to_account_secure
     TEE_AVAILABLE = True
 except ImportError:
@@ -106,8 +106,12 @@ class TEEManager:
             # get_key() returns a GetKeyResponse with the key derivation
             path = f"pbts/bls/{secrets.token_hex(16)}"
             purpose = "signature"
+
+            self.logger.info(f"[TEE] Deriving key from path: {path}")
             key_response = DstackClient().get_key(path, purpose)
             private_key_bytes = key_response.decode_key()  # Returns 32 bytes
+            self.logger.info(
+                f"[TEE] Raw key material (hex): {private_key_bytes.hex()[:64]}...")
 
             # Ensure private key is in valid range for BLS12-381
             private_key_int = int.from_bytes(private_key_bytes, 'big')
@@ -118,9 +122,15 @@ class TEEManager:
 
             # bls.SkToPk returns bytes directly (48 bytes for BLS12-381 public key)
             public_key = bls.SkToPk(private_key_int)
+
+            self.logger.info(
+                f"[TEE] Private key (hex): {private_key.hex()[:32]}...")
+            self.logger.info(f"[TEE] Public key (hex): {public_key.hex()}")
         else:
             # Regular BLS key generation
             # Generate a valid private key by reducing random bytes modulo curve order
+            self.logger.info(
+                "[Regular] Generating BLS keypair using secrets.token_bytes")
             while True:
                 private_key_bytes = secrets.token_bytes(32)
                 private_key_int = int.from_bytes(private_key_bytes, 'big')
@@ -135,6 +145,10 @@ class TEEManager:
 
             # bls.SkToPk returns bytes directly (48 bytes for BLS12-381 public key)
             public_key = bls.SkToPk(private_key_int)
+
+            self.logger.info(
+                f"[Regular] Private key (hex): {private_key.hex()[:32]}...")
+            self.logger.info(f"[Regular] Public key (hex): {public_key.hex()}")
 
         end_time = time.perf_counter()
         duration_ms = (end_time - start_time) * 1000
@@ -166,19 +180,40 @@ class TEEManager:
 
         start_time = time.perf_counter()
 
+        self.logger.info(
+            f"[TEE Attestation] Generating quote for payload: {payload}")
+
         # Prepare report data (max 64 bytes)
         report_data = payload.encode('utf-8')
         if len(report_data) > 64:
             # Hash the payload if it's too long
             import hashlib
+            original_len = len(report_data)
             report_data = hashlib.sha256(report_data).digest()[:64]
+            self.logger.info(
+                f"[TEE Attestation] Payload too long ({original_len} bytes), hashed to {len(report_data)} bytes")
+        else:
+            self.logger.info(
+                f"[TEE Attestation] Report data ({len(report_data)} bytes): {report_data.hex()}")
 
         # Generate TDX quote using new API
+        self.logger.info(
+            "[TEE Attestation] Calling DstackClient().get_quote()...")
         quote_response = DstackClient().get_quote(report_data)
         tdx_quote = quote_response.quote
 
+        # Log quote details
+        if isinstance(tdx_quote, bytes):
+            self.logger.info(
+                f"[TEE Attestation] Generated TDX quote ({len(tdx_quote)} bytes): {tdx_quote.hex()[:128]}...")
+        else:
+            self.logger.info(
+                f"[TEE Attestation] Generated TDX quote (string): {str(tdx_quote)[:256]}...")
+
         end_time = time.perf_counter()
         duration_ms = (end_time - start_time) * 1000
+        self.logger.info(
+            f"[TEE Attestation] Quote generation took {duration_ms:.2f}ms")
 
         # Calculate quote size
         quote_size = len(tdx_quote) if isinstance(
@@ -215,6 +250,18 @@ class TEEManager:
         """
         start_time = time.perf_counter()
 
+        self.logger.info(
+            "[TEE Verification] Starting attestation verification")
+        self.logger.info(
+            f"[TEE Verification] Expected payload: {expected_payload}")
+
+        if isinstance(quote, bytes):
+            self.logger.info(
+                f"[TEE Verification] Quote ({len(quote)} bytes): {quote.hex()[:128]}...")
+        else:
+            self.logger.info(
+                f"[TEE Verification] Quote (string): {str(quote)[:256]}...")
+
         # TODO: Implement actual verification
         # This requires:
         # 1. Parse quote structure
@@ -222,14 +269,27 @@ class TEEManager:
         # 3. Check RTMR measurements match expected code hash
         # 4. Verify payload is included in report data
 
+        self.logger.warning(
+            "[TEE Verification] STUB IMPLEMENTATION - NOT VERIFYING!")
+        self.logger.warning("[TEE Verification] Real implementation should:")
+        self.logger.warning(
+            "[TEE Verification]   1. Parse TDX quote structure")
+        self.logger.warning(
+            "[TEE Verification]   2. Verify Intel/AMD signature chain")
+        self.logger.warning("[TEE Verification]   3. Check RTMR measurements")
+        self.logger.warning(
+            "[TEE Verification]   4. Validate payload inclusion")
+
         # Placeholder: always return True for now
         is_valid = True
 
         end_time = time.perf_counter()
         duration_ms = (end_time - start_time) * 1000
 
-        self.logger.warning(
-            "verify_attestation is a stub - implement actual verification")
+        self.logger.info(
+            f"[TEE Verification] Verification took {duration_ms:.2f}ms (stub)")
+        self.logger.info(
+            f"[TEE Verification] Result: {'VALID' if is_valid else 'INVALID'} (stub always returns True)")
 
         return is_valid, duration_ms
 
@@ -247,8 +307,18 @@ class TEEManager:
         if self.mode == TEEMode.DISABLED or not self.tee_available:
             raise RuntimeError("TEE not available")
 
+        self.logger.info(
+            f"[TEE Ethereum] Deriving Ethereum account from path: {path}")
+        self.logger.info(f"[TEE Ethereum] Purpose: {purpose}")
+
         key_response = DstackClient().get_key(path, purpose)
         account = to_account_secure(key_response)
+
+        self.logger.info(
+            f"[TEE Ethereum] Derived account address: {account.address}")
+        self.logger.info(
+            f"[TEE Ethereum] Note: Private key is securely stored in TEE, not exposed")
+
         return account
 
     def get_statistics(self) -> Dict[str, Any]:
