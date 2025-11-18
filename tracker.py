@@ -29,6 +29,15 @@ from py_ecc.bls import G2ProofOfPossession as bls
 from web3 import Web3
 from eth_account import Account
 
+# TEE Manager (optional - for TEE-backed operations)
+try:
+    from tee_manager import get_tee_manager, set_tee_mode, TEEMode, TEE_AVAILABLE
+    tee_manager = get_tee_manager(TEEMode.DISABLED)  # Default: disabled
+except ImportError:
+    TEE_AVAILABLE = False
+    tee_manager = None
+    logger.warning("tee_manager not available - TEE features disabled")
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -1081,15 +1090,15 @@ def keygen():
     """
     Generate a new BLS keypair for testing.
     In production, clients should generate their own keys securely.
-    
+
     BLS12-381 keys:
     - Private key: 32 bytes
-    - Public key: 48 bytes  
+    - Public key: 48 bytes
     - Signature: 96 bytes
     """
     try:
         private_key, public_key = generate_keypair()
-        
+
         return jsonify({
             'success': True,
             'private_key': base64.b64encode(private_key).decode(),
@@ -1101,6 +1110,171 @@ def keygen():
         })
     except Exception as e:
         logger.error(f"Keygen error: {e}", exc_info=True)
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/keygen-tee', methods=['POST'])
+def keygen_tee():
+    """
+    Generate a TEE-derived BLS keypair.
+    Key is derived from TEE's root of trust using dstack_sdk.
+
+    Returns same format as /keygen but with TEE attestation.
+    """
+    if not TEE_AVAILABLE or tee_manager is None:
+        return jsonify({
+            'success': False,
+            'error': 'TEE not available - install dstack_sdk'
+        }), 503
+
+    try:
+        # Generate TEE-derived keypair
+        keypair = tee_manager.generate_keypair(tee_enabled=True)
+
+        return jsonify({
+            'success': True,
+            'private_key': base64.b64encode(keypair.private_key).decode(),
+            'public_key': base64.b64encode(keypair.public_key).decode(),
+            'key_type': 'BLS12-381 (TEE-derived)',
+            'private_key_size': len(keypair.private_key),
+            'public_key_size': len(keypair.public_key),
+            'tee_derived': True,
+            'derivation_time_ms': keypair.derivation_time_ms,
+            'warning': 'Store private key securely! Never share it!'
+        })
+    except Exception as e:
+        logger.error(f"TEE keygen error: {e}", exc_info=True)
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/generate-attestation', methods=['POST'])
+def generate_attestation():
+    """
+    Generate TEE attestation report (TDX quote).
+
+    Request JSON:
+        {
+            "payload": "data to attest (e.g., user_id, registration message)"
+        }
+
+    Response:
+        {
+            "success": true,
+            "quote": "...",
+            "generation_time_ms": 42.5,
+            "payload": "...",
+            "quote_size_bytes": 1234
+        }
+    """
+    if not TEE_AVAILABLE or tee_manager is None:
+        return jsonify({
+            'success': False,
+            'error': 'TEE not available - install dstack_sdk'
+        }), 503
+
+    try:
+        data = request.get_json()
+        payload = data.get('payload')
+
+        if not payload:
+            return jsonify({'success': False, 'error': 'Missing payload'}), 400
+
+        # Generate attestation
+        attestation = tee_manager.generate_attestation(payload)
+
+        return jsonify({
+            'success': True,
+            'quote': attestation.quote,
+            'generation_time_ms': attestation.generation_time_ms,
+            'payload': attestation.payload,
+            'quote_size_bytes': attestation.quote_size_bytes
+        })
+
+    except Exception as e:
+        logger.error(f"Attestation generation error: {e}", exc_info=True)
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/verify-attestation', methods=['POST'])
+def verify_attestation():
+    """
+    Verify TEE attestation report.
+
+    NOTE: This is a STUB. User must implement actual verification.
+
+    Request JSON:
+        {
+            "quote": "TDX quote to verify",
+            "expected_payload": "expected payload in quote"
+        }
+
+    Response:
+        {
+            "success": true,
+            "is_valid": true/false,
+            "verification_time_ms": 1.5,
+            "note": "stub_implementation"
+        }
+    """
+    if not TEE_AVAILABLE or tee_manager is None:
+        return jsonify({
+            'success': False,
+            'error': 'TEE not available - install dstack_sdk'
+        }), 503
+
+    try:
+        data = request.get_json()
+        quote = data.get('quote')
+        expected_payload = data.get('expected_payload')
+
+        if not quote or not expected_payload:
+            return jsonify({'success': False, 'error': 'Missing quote or expected_payload'}), 400
+
+        # Verify attestation (STUB)
+        is_valid, verification_time_ms = tee_manager.verify_attestation(quote, expected_payload)
+
+        return jsonify({
+            'success': True,
+            'is_valid': is_valid,
+            'verification_time_ms': verification_time_ms,
+            'note': 'STUB - implement actual verification in tee_manager.py'
+        })
+
+    except Exception as e:
+        logger.error(f"Attestation verification error: {e}", exc_info=True)
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/tee/status', methods=['GET'])
+def tee_status():
+    """
+    Get TEE status and statistics.
+
+    Returns:
+        {
+            "tee_available": true/false,
+            "tee_mode": "disabled/enabled/benchmark",
+            "statistics": {...}
+        }
+    """
+    if not TEE_AVAILABLE or tee_manager is None:
+        return jsonify({
+            'tee_available': False,
+            'tee_mode': 'unavailable',
+            'error': 'dstack_sdk not installed'
+        })
+
+    try:
+        stats = tee_manager.get_statistics()
+
+        return jsonify({
+            'tee_available': True,
+            'tee_mode': tee_manager.mode.value,
+            'statistics': stats
+        })
+
+    except Exception as e:
+        logger.error(f"TEE status error: {e}", exc_info=True)
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
@@ -1200,7 +1374,7 @@ def verify_receipt_endpoint():
 def config():
     """
     Get or update tracker configuration.
-    POST to enable/disable signature verification (for testing).
+    POST to enable/disable signature verification (for testing) and TEE mode.
     """
     if request.method == 'POST':
         try:
@@ -1208,27 +1382,46 @@ def config():
             if 'verify_signatures' in data:
                 state.verify_signatures = bool(data['verify_signatures'])
                 logger.info(f"Signature verification: {state.verify_signatures}")
-            
+
             if 'receipt_window' in data:
                 state.receipt_window = int(data['receipt_window'])
                 logger.info(f"Receipt window: {state.receipt_window}s")
-            
+
+            # TEE mode configuration
+            if 'tee_mode' in data and TEE_AVAILABLE:
+                mode_str = data['tee_mode'].lower()
+                if mode_str == 'disabled':
+                    set_tee_mode(TEEMode.DISABLED)
+                elif mode_str == 'enabled':
+                    set_tee_mode(TEEMode.ENABLED)
+                elif mode_str == 'benchmark':
+                    set_tee_mode(TEEMode.BENCHMARK)
+                else:
+                    return jsonify({'success': False, 'error': f'Invalid tee_mode: {mode_str}'}), 400
+                logger.info(f"TEE mode: {mode_str}")
+
             return jsonify({
                 'success': True,
                 'message': 'Configuration updated'
             })
         except Exception as e:
             return jsonify({'success': False, 'error': str(e)}), 400
-    
+
     # GET request - return current config
-    return jsonify({
+    config_data = {
         'instance_id': state.instance_id,
         'verify_signatures': state.verify_signatures,
         'receipt_window': state.receipt_window,
         'min_ratio': app.config['MIN_RATIO'],
         'max_peers': app.config['MAX_PEERS'],
-        'used_receipts_count': len(state.used_receipts)
-    })
+        'used_receipts_count': len(state.used_receipts),
+        'tee_available': TEE_AVAILABLE
+    }
+
+    if TEE_AVAILABLE and tee_manager is not None:
+        config_data['tee_mode'] = tee_manager.mode.value
+
+    return jsonify(config_data)
 
 # ============================================================================
 # PBTS Interaction with Smart Contracts
