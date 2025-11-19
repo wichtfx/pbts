@@ -197,63 +197,6 @@ def verify_receipt(
 
 
 # ============================================================================
-# PBTS Attestation Functions (Algorithms from Paper)
-# ============================================================================
-
-def attest_piece_transfer(
-    receiver_private_key: bytes,
-    sender_public_key: bytes,
-    piece_hash: bytes,
-    piece_index: int,
-    infohash: bytes,
-    timestamp: int
-) -> bytes:
-    """
-    Generate cryptographic receipt for piece transfer (Attest algorithm).
-
-    Args:
-        receiver_private_key: Receiver's private key (PEM format)
-        sender_public_key: Sender's public key (PEM format)
-        piece_hash: SHA1 hash of the piece
-        piece_index: Index of the piece in the torrent
-        infohash: SHA1 hash of the torrent
-        timestamp: Unix timestamp of transfer
-
-    Returns:
-        Signature (receipt) as bytes
-    """
-    # Construct message: infohash || sender_pk || piece_hash || index || timestamp
-    message = infohash + sender_public_key + piece_hash + \
-        piece_index.to_bytes(4, 'big') + timestamp.to_bytes(8, 'big')
-
-    # Sign with receiver's key
-    receipt = sign_message(receiver_private_key, message)
-    return receipt
-
-
-def verify_receipt(
-    receiver_public_key: bytes,
-    sender_public_key: bytes,
-    piece_hash: bytes,
-    piece_index: int,
-    infohash: bytes,
-    timestamp: int,
-    receipt: bytes
-) -> bool:
-    """
-    Verify cryptographic receipt (Verify algorithm).
-
-    Returns True if receipt is valid, False otherwise.
-    """
-    # Reconstruct the message that was signed
-    message = infohash + sender_public_key + piece_hash + \
-        piece_index.to_bytes(4, 'big') + timestamp.to_bytes(8, 'big')
-
-    # Verify signature
-    return verify_signature(receiver_public_key, message, receipt)
-
-
-# ============================================================================
 # Data Models
 # ============================================================================
 
@@ -1007,30 +950,33 @@ def report():
         # Run garbage collection on old receipts
         state.garbage_collect_receipts()
 
-        # Verify receipts if provided
+        # Process receipts if provided
         verified_upload = 0
         verified_download = 0
+        processed_receipts = 0
 
-        if receipts and state.verify_signatures:
+        if receipts:
             try:
-                # Try to decode sender's public key
-                try:
-                    sender_pk = base64.b64decode(public_key or user.public_key)
-                except Exception as e:
-                    logger.warning(f"Could not decode sender public key: {e}")
-                    # Skip receipt verification if key can't be decoded
-                    state.update_user_stats(
-                        user_id, uploaded_delta, downloaded_delta)
-                    return jsonify({
-                        'success': True,
-                        'total_uploaded': user.total_uploaded,
-                        'total_downloaded': user.total_downloaded,
-                        'ratio': user.ratio,
-                        'verified_receipts': 0,
-                        'warning': 'Receipt verification skipped due to invalid key format'
-                    })
+                # Get sender's public key if verification is enabled
+                sender_pk = None
+                if state.verify_signatures:
+                    try:
+                        sender_pk = base64.b64decode(public_key or user.public_key)
+                    except Exception as e:
+                        logger.warning(f"Could not decode sender public key: {e}")
+                        # Skip receipt verification if key can't be decoded
+                        state.update_user_stats(
+                            user_id, uploaded_delta, downloaded_delta)
+                        return jsonify({
+                            'success': True,
+                            'total_uploaded': user.total_uploaded,
+                            'total_downloaded': user.total_downloaded,
+                            'ratio': user.ratio,
+                            'verified_receipts': 0,
+                            'warning': 'Receipt verification skipped due to invalid key format'
+                        })
 
-                # Collect all receipts for batch verification
+                # Collect receipts for processing
                 valid_receipts = []
                 public_keys_for_agg = []
                 messages_for_agg = []
@@ -1039,26 +985,23 @@ def report():
                 for receipt_data in receipts:
                     # Extract receipt fields
                     receiver_pk_b64 = receipt_data.get('receiver_public_key')
+                    sender_pk_b64 = receipt_data.get('sender_pk')  # Alternative field name
                     piece_hash_hex = receipt_data.get('piece_hash')
                     piece_index = receipt_data.get('piece_index')
                     infohash_hex = receipt_data.get('infohash')
                     timestamp = receipt_data.get('timestamp')
                     receipt_sig_b64 = receipt_data.get('signature')
-                    piece_size = receipt_data.get(
-                        'piece_size', 16384)  # Default 16KB
+                    piece_size = receipt_data.get('piece_size', 16384)  # Default 16KB
 
-                    if not all([receiver_pk_b64, piece_hash_hex, piece_index is not None,
-                               infohash_hex, timestamp, receipt_sig_b64]):
-                        logger.warning(
-                            f"Incomplete receipt data from {user_id}")
+                    # Skip incomplete receipts (basic fields required for both modes)
+                    if not all([piece_hash_hex, piece_index is not None, infohash_hex, timestamp]):
+                        logger.warning(f"Incomplete receipt data from {user_id}")
                         continue
 
                     try:
-                        # Decode receipt components
-                        receiver_pk = base64.b64decode(receiver_pk_b64)
+                        # Decode basic receipt components
                         piece_hash = bytes.fromhex(piece_hash_hex)
                         infohash = bytes.fromhex(infohash_hex)
-                        receipt_sig = base64.b64decode(receipt_sig_b64)
 
                         # Check timestamp is recent (within acceptance window)
                         current_time = int(time.time())
@@ -1067,70 +1010,93 @@ def report():
                                 f"Receipt expired for {user_id}: {current_time - timestamp}s old")
                             continue
 
-                        # Generate receipt ID for double-spend check
-                        receipt_id = hashlib.sha256(
-                            infohash + sender_pk + receiver_pk +
-                            piece_hash + piece_index.to_bytes(4, 'big')
-                        ).hexdigest()
+                        # If verification is enabled, prepare for cryptographic verification
+                        if state.verify_signatures:
+                            if not all([receiver_pk_b64, receipt_sig_b64, sender_pk_b64]):
+                                logger.warning(f"Missing signature data for verification from {user_id}")
+                                continue
 
-                        # Check if receipt already used
-                        if state.is_receipt_used(receipt_id):
-                            logger.warning(
-                                f"Receipt already used: {receipt_id[:16]}...")
-                            continue
+                            receiver_pk = base64.b64decode(receiver_pk_b64)
+                            receipt_sig = base64.b64decode(receipt_sig_b64)
+                            sender_pk = base64.b64decode(sender_pk_b64)
 
-                        # Reconstruct the message that was signed
-                        message = infohash + sender_pk + piece_hash + \
-                            piece_index.to_bytes(
-                                4, 'big') + timestamp.to_bytes(8, 'big')
+                            # Generate receipt ID for double-spend check
+                            receipt_id = hashlib.sha256(
+                                infohash + sender_pk + receiver_pk +
+                                piece_hash + piece_index.to_bytes(4, 'big')
+                            ).hexdigest()
 
-                        # Store for batch verification
-                        valid_receipts.append({
-                            'receipt_id': receipt_id,
-                            'piece_size': piece_size
-                        })
-                        public_keys_for_agg.append(receiver_pk)
-                        messages_for_agg.append(message)
-                        signatures_for_agg.append(receipt_sig)
+                            # Check if receipt already used
+                            if state.is_receipt_used(receipt_id):
+                                logger.warning(f"Receipt already used: {receipt_id[:16]}...")
+                                continue
+
+                            # Reconstruct the message that was signed
+                            message = infohash + sender_pk + piece_hash + \
+                                piece_index.to_bytes(4, 'big') + timestamp.to_bytes(8, 'big')
+
+                            # Store for batch verification
+                            valid_receipts.append({
+                                'receipt_id': receipt_id,
+                                'piece_size': piece_size
+                            })
+                            public_keys_for_agg.append(receiver_pk)
+                            messages_for_agg.append(message)
+                            signatures_for_agg.append(receipt_sig)
+                        else:
+                            # Verification disabled - trust the client and count the receipt
+                            valid_receipts.append({
+                                'receipt_id': None,  # No receipt ID needed without verification
+                                'piece_size': piece_size
+                            })
 
                     except Exception as e:
                         logger.warning(f"Error processing receipt: {e}")
                         continue
 
-                # Batch verify all receipts using BLS aggregate verification
+                # Process valid receipts
                 if valid_receipts:
-                    try:
-                        # Aggregate all signatures
-                        aggregate_sig = aggregate_signatures(
-                            signatures_for_agg)
+                    if state.verify_signatures:
+                        # Batch verify all receipts using BLS aggregate verification
+                        try:
+                            # Aggregate all signatures
+                            aggregate_sig = aggregate_signatures(signatures_for_agg)
 
-                        # Verify all at once (MUCH faster than individual verification!)
-                        if aggregate_verify(public_keys_for_agg, messages_for_agg, aggregate_sig):
-                            # All receipts are valid!
-                            for receipt_info in valid_receipts:
-                                state.mark_receipt_used(
-                                    receipt_info['receipt_id'])
-                                verified_upload += receipt_info['piece_size']
-                                verified_download += receipt_info['piece_size']
+                            # Verify all at once (MUCH faster than individual verification!)
+                            if aggregate_verify(public_keys_for_agg, messages_for_agg, aggregate_sig):
+                                # All receipts are valid!
+                                for receipt_info in valid_receipts:
+                                    state.mark_receipt_used(receipt_info['receipt_id'])
+                                    verified_upload += receipt_info['piece_size']
+                                    verified_download += receipt_info['piece_size']
+                                    processed_receipts += 1
 
-                            logger.info(f"Batch verified {len(valid_receipts)} receipts for {user_id} "
-                                        f"({verified_upload} bytes upload, {verified_download} bytes download)")
-                        else:
-                            logger.warning(
-                                f"Aggregate signature verification failed for {user_id}")
-                            # Don't credit any receipts if aggregate verification fails
-                    except Exception as e:
-                        logger.error(
-                            f"Batch verification error: {e}", exc_info=True)
+                                logger.info(f"Batch verified {processed_receipts} receipts for {user_id} "
+                                            f"({verified_upload} bytes upload, {verified_download} bytes download)")
+                            else:
+                                logger.warning(
+                                    f"Aggregate signature verification failed for {user_id}")
+                                # Don't credit any receipts if aggregate verification fails
+                        except Exception as e:
+                            logger.error(f"Batch verification error: {e}", exc_info=True)
+                    else:
+                        # Verification disabled - accept all receipts
+                        for receipt_info in valid_receipts:
+                            verified_upload += receipt_info['piece_size']
+                            verified_download += receipt_info['piece_size']
+                            processed_receipts += 1
 
-                # If receipts were provided, use only verified amounts
-                if len(receipts) > 0:
+                        logger.info(f"Accepted {processed_receipts} receipts for {user_id} without verification "
+                                    f"({verified_upload} bytes upload, {verified_download} bytes download)")
+
+                # If receipts were processed, use those amounts instead of deltas
+                if processed_receipts > 0:
                     uploaded_delta = verified_upload
                     downloaded_delta = verified_download
 
             except Exception as e:
-                logger.error(f"Receipt verification error: {e}", exc_info=True)
-                return jsonify({'success': False, 'error': f'Receipt verification failed: {str(e)}'}), 400
+                logger.error(f"Receipt processing error: {e}", exc_info=True)
+                return jsonify({'success': False, 'error': f'Receipt processing failed: {str(e)}'}), 400
 
         # Update user statistics
         state.update_user_stats(user_id, uploaded_delta, downloaded_delta)
