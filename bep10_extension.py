@@ -185,12 +185,30 @@ class BEP10Handler:
         # Track whether peer supports PBTS
         self.peer_supports_pbts = False
 
+        # Performance statistics
+        self.stats = {
+            'handshakes_created': 0,
+            'handshakes_parsed': 0,
+            'receipts_created': 0,
+            'receipts_parsed': 0,
+            'batches_created': 0,
+            'batches_parsed': 0,
+            'total_handshake_create_time_ms': 0,
+            'total_handshake_parse_time_ms': 0,
+            'total_receipt_create_time_ms': 0,
+            'total_receipt_parse_time_ms': 0,
+            'total_batch_create_time_ms': 0,
+            'total_batch_parse_time_ms': 0,
+        }
+
     def create_handshake(self, listening_port: Optional[int] = None) -> bytes:
         """
         Create extended handshake message
 
         Returns: Complete message to send on wire (length prefix + ID + payload)
         """
+        start_time = time.perf_counter()
+
         # Assign local message IDs for PBTS extensions
         self.local_ext_ids = {
             PBTS_RECEIPT_MSG: 1,
@@ -217,12 +235,19 @@ class BEP10Handler:
         # length = 1 (extended ID) + 1 (handshake ID) + len(payload)
         message_length = 2 + len(payload)
 
-        return (
+        result = (
             struct.pack(">I", message_length) +
             struct.pack("B", EXTENDED_MESSAGE_ID) +
             struct.pack("B", HANDSHAKE_MESSAGE_ID) +
             payload
         )
+
+        end_time = time.perf_counter()
+        duration_ms = (end_time - start_time) * 1000
+        self.stats['handshakes_created'] += 1
+        self.stats['total_handshake_create_time_ms'] += duration_ms
+
+        return result
 
     def parse_handshake(self, payload: bytes) -> bool:
         """
@@ -230,6 +255,8 @@ class BEP10Handler:
 
         Returns: True if peer supports PBTS, False otherwise
         """
+        start_time = time.perf_counter()
+
         try:
             # Decode bencoded handshake
             data = bencoder.decode(payload)
@@ -253,13 +280,31 @@ class BEP10Handler:
                     self.peer_supports_pbts = True
                     logger.info(
                         f"Peer supports PBTS extension (IDs: {self.remote_ext_ids})")
+
+                    end_time = time.perf_counter()
+                    duration_ms = (end_time - start_time) * 1000
+                    self.stats['handshakes_parsed'] += 1
+                    self.stats['total_handshake_parse_time_ms'] += duration_ms
+
                     return True
 
             logger.info("Peer does not support PBTS extension")
+
+            end_time = time.perf_counter()
+            duration_ms = (end_time - start_time) * 1000
+            self.stats['handshakes_parsed'] += 1
+            self.stats['total_handshake_parse_time_ms'] += duration_ms
+
             return False
 
         except Exception as e:
             logger.error(f"Failed to parse extended handshake: {e}")
+
+            end_time = time.perf_counter()
+            duration_ms = (end_time - start_time) * 1000
+            self.stats['handshakes_parsed'] += 1
+            self.stats['total_handshake_parse_time_ms'] += duration_ms
+
             return False
 
     def create_receipt_message(self, receipt: PBTSReceipt) -> bytes:
@@ -269,6 +314,8 @@ class BEP10Handler:
         Message format:
         <length><ext_id><msg_id><bencoded_receipt>
         """
+        start_time = time.perf_counter()
+
         if not self.peer_supports_pbts:
             raise ValueError("Peer does not support PBTS extension")
 
@@ -282,12 +329,19 @@ class BEP10Handler:
         # Construct message
         message_length = 2 + len(payload)  # ext_id + msg_id + payload
 
-        return (
+        result = (
             struct.pack(">I", message_length) +
             struct.pack("B", EXTENDED_MESSAGE_ID) +
             struct.pack("B", msg_id) +
             payload
         )
+
+        end_time = time.perf_counter()
+        duration_ms = (end_time - start_time) * 1000
+        self.stats['receipts_created'] += 1
+        self.stats['total_receipt_create_time_ms'] += duration_ms
+
+        return result
 
     def create_receipt_batch_message(self, receipts: List[PBTSReceipt]) -> bytes:
         """
@@ -295,6 +349,8 @@ class BEP10Handler:
 
         Sends multiple receipts in one message for efficiency
         """
+        start_time = time.perf_counter()
+
         if not self.peer_supports_pbts:
             raise ValueError("Peer does not support PBTS extension")
 
@@ -309,12 +365,19 @@ class BEP10Handler:
         # Construct message
         message_length = 2 + len(payload)
 
-        return (
+        result = (
             struct.pack(">I", message_length) +
             struct.pack("B", EXTENDED_MESSAGE_ID) +
             struct.pack("B", msg_id) +
             payload
         )
+
+        end_time = time.perf_counter()
+        duration_ms = (end_time - start_time) * 1000
+        self.stats['batches_created'] += 1
+        self.stats['total_batch_create_time_ms'] += duration_ms
+
+        return result
 
     def create_request_receipt_message(
         self,
@@ -357,6 +420,8 @@ class BEP10Handler:
 
         Returns: Parsed message object or None if unknown message
         """
+        start_time = time.perf_counter()
+
         # Find message type by ID
         msg_type = None
         for name, mid in self.local_ext_ids.items():
@@ -372,11 +437,20 @@ class BEP10Handler:
             data = bencoder.decode(payload)
 
             if msg_type == PBTS_RECEIPT_MSG:
-                return PBTSReceipt.from_dict(data)
+                result = PBTSReceipt.from_dict(data)
+                end_time = time.perf_counter()
+                duration_ms = (end_time - start_time) * 1000
+                self.stats['receipts_parsed'] += 1
+                self.stats['total_receipt_parse_time_ms'] += duration_ms
+                return result
 
             elif msg_type == PBTS_RECEIPT_BATCH_MSG:
                 receipts = [PBTSReceipt.from_dict(
                     r) for r in data[b"receipts"]]
+                end_time = time.perf_counter()
+                duration_ms = (end_time - start_time) * 1000
+                self.stats['batches_parsed'] += 1
+                self.stats['total_batch_parse_time_ms'] += duration_ms
                 return receipts
 
             elif msg_type == PBTS_REQUEST_RECEIPT_MSG:
@@ -403,6 +477,77 @@ class BEP10Handler:
     def should_batch_report(self, threshold: int = 10) -> bool:
         """Check if we have enough receipts to send batch report"""
         return len(self.pending_receipts) >= threshold
+
+    def get_statistics(self) -> Dict[str, Any]:
+        """
+        Get performance statistics.
+
+        Returns:
+            Dictionary with timing statistics
+        """
+        stats = self.stats.copy()
+
+        # Calculate averages
+        if stats['handshakes_created'] > 0:
+            stats['avg_handshake_create_time_ms'] = (
+                stats['total_handshake_create_time_ms'] / stats['handshakes_created']
+            )
+        else:
+            stats['avg_handshake_create_time_ms'] = 0
+
+        if stats['handshakes_parsed'] > 0:
+            stats['avg_handshake_parse_time_ms'] = (
+                stats['total_handshake_parse_time_ms'] / stats['handshakes_parsed']
+            )
+        else:
+            stats['avg_handshake_parse_time_ms'] = 0
+
+        if stats['receipts_created'] > 0:
+            stats['avg_receipt_create_time_ms'] = (
+                stats['total_receipt_create_time_ms'] / stats['receipts_created']
+            )
+        else:
+            stats['avg_receipt_create_time_ms'] = 0
+
+        if stats['receipts_parsed'] > 0:
+            stats['avg_receipt_parse_time_ms'] = (
+                stats['total_receipt_parse_time_ms'] / stats['receipts_parsed']
+            )
+        else:
+            stats['avg_receipt_parse_time_ms'] = 0
+
+        if stats['batches_created'] > 0:
+            stats['avg_batch_create_time_ms'] = (
+                stats['total_batch_create_time_ms'] / stats['batches_created']
+            )
+        else:
+            stats['avg_batch_create_time_ms'] = 0
+
+        if stats['batches_parsed'] > 0:
+            stats['avg_batch_parse_time_ms'] = (
+                stats['total_batch_parse_time_ms'] / stats['batches_parsed']
+            )
+        else:
+            stats['avg_batch_parse_time_ms'] = 0
+
+        return stats
+
+    def reset_statistics(self):
+        """Reset performance counters"""
+        self.stats = {
+            'handshakes_created': 0,
+            'handshakes_parsed': 0,
+            'receipts_created': 0,
+            'receipts_parsed': 0,
+            'batches_created': 0,
+            'batches_parsed': 0,
+            'total_handshake_create_time_ms': 0,
+            'total_handshake_parse_time_ms': 0,
+            'total_receipt_create_time_ms': 0,
+            'total_receipt_parse_time_ms': 0,
+            'total_batch_create_time_ms': 0,
+            'total_batch_parse_time_ms': 0,
+        }
 
 
 def compute_piece_hash(piece_data: bytes) -> bytes:
