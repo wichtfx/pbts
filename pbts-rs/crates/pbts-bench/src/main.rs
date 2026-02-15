@@ -54,7 +54,7 @@ enum Commands {
         #[arg(long, default_value_t = 100)]
         users: usize,
         /// Path to the Foundry smartcontract project directory
-        #[arg(long, default_value = "../../smartcontract")]
+        #[arg(long, default_value = "../smartcontract")]
         contract_project: String,
         #[arg(long)]
         output: Option<PathBuf>,
@@ -198,7 +198,7 @@ async fn main() -> anyhow::Result<()> {
 
             // 4. Gas (optional)
             if !skip_gas {
-                match bench_gas::run_gas_benchmarks(100, "../../smartcontract").await {
+                match bench_gas::run_gas_benchmarks(100, "../smartcontract").await {
                     Ok(gas) => save_json(&out_dir.join("gas.json"), &gas),
                     Err(e) => println!("Gas benchmark failed (Anvil not available?): {e}"),
                 }

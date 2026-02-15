@@ -3,10 +3,6 @@ use blst::min_pk::SecretKey;
 use dstack_sdk::dstack_client::DstackClient;
 use serde::Serialize;
 
-/// BLS12-381 curve order
-const CURVE_ORDER: &str =
-    "73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001";
-
 #[derive(Debug, Clone, Serialize)]
 pub struct TEEKeyPair {
     pub private_key: Vec<u8>,
@@ -44,30 +40,19 @@ impl TEEManager {
 
         // Decode the key material
         let key_bytes = hex::decode(&response.key)?;
+        anyhow::ensure!(
+            key_bytes.len() >= 32,
+            "dstack key material too short ({} bytes)",
+            key_bytes.len()
+        );
 
-        // Reduce modulo BLS curve order
-        let order = num_bigint_from_hex(CURVE_ORDER);
-        let key_int = num_bigint_from_bytes(&key_bytes);
-        let reduced = key_int % &order;
-        let reduced = if reduced == num_bigint::BigUint::ZERO {
-            num_bigint::BigUint::from(1u32)
-        } else {
-            reduced
-        };
-
-        // Convert to 32-byte big-endian
-        let mut sk_bytes = reduced.to_bytes_be();
-        while sk_bytes.len() < 32 {
-            sk_bytes.insert(0, 0);
-        }
-        sk_bytes.truncate(32);
-
-        let sk = SecretKey::from_bytes(&sk_bytes)
-            .map_err(|e| anyhow::anyhow!("invalid BLS secret key: {:?}", e))?;
+        // Use blst's key_gen which derives a valid BLS secret key via HKDF
+        let sk = SecretKey::key_gen(&key_bytes, &[])
+            .map_err(|e| anyhow::anyhow!("BLS key generation failed: {:?}", e))?;
         let pk = sk.sk_to_pk();
 
         Ok(TEEKeyPair {
-            private_key: sk_bytes,
+            private_key: sk.to_bytes().to_vec(),
             public_key: pk.compress().to_vec(),
             tee_derived: true,
         })
@@ -94,93 +79,12 @@ impl TEEManager {
     /// Verify a TEE attestation quote.
     pub async fn verify_attestation(&self, quote: &str, _expected_payload: &str) -> Result<bool> {
         let quote_bytes = hex::decode(quote)?;
-        let result = self.client.verify(
+        let resp = self.client.verify(
             "tdx_quote",
             quote_bytes,
             vec![],
             vec![],
-        ).await;
-        match result {
-            Ok(resp) => Ok(resp.valid),
-            Err(e) => {
-                tracing::warn!("attestation verification error: {e}");
-                Ok(false)
-            }
-        }
+        ).await?;
+        Ok(resp.valid)
     }
-}
-
-// Minimal bigint helpers to avoid pulling in a full bigint crate for just modular reduction
-mod num_bigint {
-    #[derive(Clone, Debug, PartialEq, Eq)]
-    pub struct BigUint {
-        digits: Vec<u64>,
-    }
-
-    impl BigUint {
-        pub const ZERO: BigUint = BigUint { digits: vec![] };
-
-        pub fn from_bytes_be(bytes: &[u8]) -> Self {
-            let mut digits = vec![];
-            let chunks = bytes.rchunks(8);
-            for chunk in chunks {
-                let mut buf = [0u8; 8];
-                buf[8 - chunk.len()..].copy_from_slice(chunk);
-                digits.push(u64::from_be_bytes(buf));
-            }
-            // Remove leading zeros
-            while digits.last() == Some(&0) {
-                digits.pop();
-            }
-            BigUint { digits }
-        }
-
-        pub fn to_bytes_be(&self) -> Vec<u8> {
-            if self.digits.is_empty() {
-                return vec![0];
-            }
-            let mut bytes = Vec::new();
-            for &d in self.digits.iter().rev() {
-                bytes.extend_from_slice(&d.to_be_bytes());
-            }
-            // Strip leading zeros
-            let start = bytes.iter().position(|&b| b != 0).unwrap_or(bytes.len() - 1);
-            bytes[start..].to_vec()
-        }
-    }
-
-    impl From<u32> for BigUint {
-        fn from(val: u32) -> Self {
-            if val == 0 {
-                BigUint { digits: vec![] }
-            } else {
-                BigUint {
-                    digits: vec![val as u64],
-                }
-            }
-        }
-    }
-
-    impl std::ops::Rem<&BigUint> for BigUint {
-        type Output = BigUint;
-        fn rem(self, _rhs: &BigUint) -> BigUint {
-            // For our use case (reducing a 256-bit number mod a 255-bit prime),
-            // a simple approach: convert to bytes, use a different method
-            // Actually, we'll use a simpler approach: just mask to valid range
-            // Since the BLS curve order is ~255 bits, and our input is 256 bits,
-            // the reduction is at most one subtraction.
-            // For correctness, we'll just truncate and hope blst handles it.
-            // blst's from_bytes does its own reduction internally.
-            self
-        }
-    }
-}
-
-fn num_bigint_from_hex(hex_str: &str) -> num_bigint::BigUint {
-    let bytes = hex::decode(hex_str).unwrap();
-    num_bigint::BigUint::from_bytes_be(&bytes)
-}
-
-fn num_bigint_from_bytes(bytes: &[u8]) -> num_bigint::BigUint {
-    num_bigint::BigUint::from_bytes_be(bytes)
 }

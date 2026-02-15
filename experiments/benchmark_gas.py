@@ -70,6 +70,7 @@ def deploy_with_forge(
         "--rpc-url", rpc_url,
         "--private-key", private_key,
         "--root", project_root,
+        "--broadcast",
     ]
     if constructor_args:
         cmd.extend(["--constructor-args"] + constructor_args)

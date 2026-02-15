@@ -192,15 +192,28 @@ async fn run_attestation_verify(iterations: usize) -> anyhow::Result<Attestation
 
     let mut timings = Vec::with_capacity(iterations);
     let mut successes = 0u32;
-    for _ in 0..iterations {
+    for i in 0..iterations {
         let start = Instant::now();
-        let valid = manager
+        match manager
             .verify_attestation(&report.quote, "verify-bench")
             .await
-            .unwrap_or(false);
-        timings.push(start.elapsed().as_secs_f64() * 1000.0);
-        if valid {
-            successes += 1;
+        {
+            Ok(true) => {
+                timings.push(start.elapsed().as_secs_f64() * 1000.0);
+                successes += 1;
+            }
+            Ok(false) => {
+                timings.push(start.elapsed().as_secs_f64() * 1000.0);
+                if i == 0 {
+                    println!("   Warning: verification returned valid=false");
+                }
+            }
+            Err(e) => {
+                timings.push(start.elapsed().as_secs_f64() * 1000.0);
+                if i == 0 {
+                    println!("   Warning: verification error: {e}");
+                }
+            }
         }
     }
     Ok(AttestationVerifyResults {
