@@ -24,6 +24,8 @@ from experiments.benchmark_receipts import ReceiptBenchmark
 from experiments.benchmark_tee import TEEBenchmark
 from experiments.benchmark_client_download import ClientDownloadBenchmark, DownloadScenario
 from experiments.benchmark_tracker_overhead import TrackerOverheadBenchmark
+from experiments.benchmark_scalability import ScalabilityBenchmark
+from experiments.benchmark_gas import GasBenchmark
 
 from tee_manager import TEE_AVAILABLE
 
@@ -43,7 +45,8 @@ class ExperimentRunner:
         tracker_overhead_iterations: int = 100,
         skip_tee: bool = False,
         skip_client_download: bool = False,
-        skip_tracker_overhead: bool = False
+        skip_tracker_overhead: bool = False,
+        **kwargs
     ):
         self.output_dir = output_dir or Path("/tmp/pbts_experiments")
         self.output_dir.mkdir(exist_ok=True, parents=True)
@@ -59,6 +62,12 @@ class ExperimentRunner:
         self.skip_tee = skip_tee or not TEE_AVAILABLE
         self.skip_client_download = skip_client_download
         self.skip_tracker_overhead = skip_tracker_overhead
+        self.skip_scalability = kwargs.get('skip_scalability', False)
+        self.skip_gas = kwargs.get('skip_gas', False)
+
+        self.scalability_peer_counts = kwargs.get('scalability_peer_counts', [10, 50, 100, 200, 500])
+        self.scalability_swarm_sizes = kwargs.get('scalability_swarm_sizes', [100, 1000, 5000, 10000])
+        self.gas_num_users = kwargs.get('gas_num_users', 100)
 
         self.results = {}
         self.start_time = None
@@ -76,19 +85,19 @@ class ExperimentRunner:
 
         # 1. Receipt Benchmarks
         print("\n\n" + "=" * 80)
-        print("EXPERIMENT 1/4: RECEIPT OPERATIONS")
+        print("EXPERIMENT 1/6: RECEIPT OPERATIONS")
         print("=" * 80)
         self.run_receipt_benchmarks()
 
         # 2. TEE Benchmarks (if available)
         if not self.skip_tee:
             print("\n\n" + "=" * 80)
-            print("EXPERIMENT 2/4: TEE OPERATIONS")
+            print("EXPERIMENT 2/6: TEE OPERATIONS")
             print("=" * 80)
             self.run_tee_benchmarks()
         else:
             print("\n\n" + "=" * 80)
-            print("EXPERIMENT 2/4: TEE OPERATIONS - SKIPPED")
+            print("EXPERIMENT 2/6: TEE OPERATIONS - SKIPPED")
             print("=" * 80)
             if not TEE_AVAILABLE:
                 print("\nTEE not available (dstack_sdk not installed)")
@@ -97,26 +106,50 @@ class ExperimentRunner:
         # 3. Client Download Benchmarks
         if not self.skip_client_download:
             print("\n\n" + "=" * 80)
-            print("EXPERIMENT 3/4: CLIENT DOWNLOAD SIMULATION")
+            print("EXPERIMENT 3/6: CLIENT DOWNLOAD SIMULATION")
             print("=" * 80)
             self.run_client_download_benchmarks()
         else:
             print("\n\n" + "=" * 80)
-            print("EXPERIMENT 3/4: CLIENT DOWNLOAD SIMULATION - SKIPPED")
+            print("EXPERIMENT 3/6: CLIENT DOWNLOAD SIMULATION - SKIPPED")
             print("=" * 80)
             self.results['client_download'] = None
 
         # 4. Tracker Overhead Benchmarks
         if not self.skip_tracker_overhead:
             print("\n\n" + "=" * 80)
-            print("EXPERIMENT 4/4: TRACKER OVERHEAD BREAKDOWN")
+            print("EXPERIMENT 4/6: TRACKER OVERHEAD BREAKDOWN")
             print("=" * 80)
             self.run_tracker_overhead_benchmarks()
         else:
             print("\n\n" + "=" * 80)
-            print("EXPERIMENT 4/4: TRACKER OVERHEAD BREAKDOWN - SKIPPED")
+            print("EXPERIMENT 4/6: TRACKER OVERHEAD BREAKDOWN - SKIPPED")
             print("=" * 80)
             self.results['tracker_overhead'] = None
+
+        # 5. Scalability Benchmarks
+        if not self.skip_scalability:
+            print("\n\n" + "=" * 80)
+            print("EXPERIMENT 5/6: SCALABILITY")
+            print("=" * 80)
+            self.run_scalability_benchmarks()
+        else:
+            print("\n\n" + "=" * 80)
+            print("EXPERIMENT 5/6: SCALABILITY - SKIPPED")
+            print("=" * 80)
+            self.results['scalability'] = None
+
+        # 6. Gas Cost Benchmarks
+        if not self.skip_gas:
+            print("\n\n" + "=" * 80)
+            print("EXPERIMENT 6/6: SMART CONTRACT GAS COSTS")
+            print("=" * 80)
+            self.run_gas_benchmarks()
+        else:
+            print("\n\n" + "=" * 80)
+            print("EXPERIMENT 6/6: SMART CONTRACT GAS COSTS - SKIPPED")
+            print("=" * 80)
+            self.results['gas'] = None
 
         self.end_time = time.time()
 
@@ -201,6 +234,36 @@ class ExperimentRunner:
         print("\nNote: Tracker overhead benchmark requires running tracker...")
         print("Skipping for now. Run benchmark_tracker_overhead.py separately.")
         self.results['tracker_overhead'] = None
+
+    def run_scalability_benchmarks(self):
+        """Run scalability benchmarks"""
+        benchmark = ScalabilityBenchmark(
+            peer_counts=self.scalability_peer_counts,
+            swarm_sizes=self.scalability_swarm_sizes,
+        )
+        results = benchmark.run_all()
+        benchmark.print_results()
+
+        self.results['scalability'] = results
+
+        output_file = self.output_dir / "scalability.json"
+        with open(output_file, 'w') as f:
+            json.dump(results, f, indent=2)
+        print(f"\nResults saved to {output_file}")
+
+    def run_gas_benchmarks(self):
+        """Run smart contract gas cost benchmarks"""
+        benchmark = GasBenchmark(num_users=self.gas_num_users)
+        results = benchmark.run_all()
+        benchmark.print_results()
+
+        self.results['gas'] = results if results else None
+
+        if results:
+            output_file = self.output_dir / "gas.json"
+            with open(output_file, 'w') as f:
+                json.dump(results, f, indent=2)
+            print(f"\nResults saved to {output_file}")
 
     def generate_reports(self):
         """Generate summary reports"""
@@ -395,6 +458,18 @@ def main():
                         help='Skip client download simulation benchmarks')
     parser.add_argument('--skip-tracker-overhead', action='store_true',
                         help='Skip tracker overhead benchmarks (requires running tracker)')
+    parser.add_argument('--skip-scalability', action='store_true',
+                        help='Skip scalability benchmarks')
+    parser.add_argument('--skip-gas', action='store_true',
+                        help='Skip gas cost benchmarks (requires Foundry)')
+    parser.add_argument('--scalability-peers', type=int, nargs='+',
+                        default=[10, 50, 100, 200, 500],
+                        help='Peer counts for scalability benchmark')
+    parser.add_argument('--scalability-swarm-sizes', type=int, nargs='+',
+                        default=[100, 1000, 5000, 10000],
+                        help='Swarm sizes for scalability benchmark')
+    parser.add_argument('--gas-users', type=int, default=100,
+                        help='Number of users for gas benchmark batch test')
 
     args = parser.parse_args()
 
@@ -408,7 +483,12 @@ def main():
         tee_verify_iterations=args.tee_verify_iterations,
         skip_tee=args.skip_tee,
         skip_client_download=args.skip_client_download,
-        skip_tracker_overhead=args.skip_tracker_overhead
+        skip_tracker_overhead=args.skip_tracker_overhead,
+        skip_scalability=args.skip_scalability,
+        skip_gas=args.skip_gas,
+        scalability_peer_counts=args.scalability_peers,
+        scalability_swarm_sizes=args.scalability_swarm_sizes,
+        gas_num_users=args.gas_users,
     )
 
     runner.run_all()
